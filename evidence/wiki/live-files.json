@@ -1,0 +1,116 @@
+[
+  {
+    "id": "capstone",
+    "title": "ECE496 Capstone",
+    "date": "2026-11-03",
+    "owner": "Team",
+    "status": "Reference copy; submission unconfirmed",
+    "url": "/files/submissions/ece496-capstone.pdf",
+    "description": "Supplied project artifact."
+  },
+  {
+    "id": "cpu-baseline",
+    "title": "CPU baseline matmul throughput",
+    "date": "2026-11-17",
+    "owner": "Jerry",
+    "status": "Measured on DE1-SoC · ARM Cortex-A9 · 2 threads, NEON SIMD kernel, 32×32 tiling",
+    "url": "/files/data/cpu-baseline-2026-11-17.txt",
+    "description": "CPU baseline for an N×N int8 matmul, measured with matmul_baseline_mt (tile 32, 2 threads, NEON kernel) on the DE1-SoC's dual-core ARM Cortex-A9. The linked text file has the raw output, every number and the full calculation.\n\nOptimization setup:\n- Tiling: 32×32 tiles.\n- 2 threads: one per Cortex-A9 core. The rows of C are split between the threads, which never need to synchronise.\n- SIMD NEON kernel: NEON instructions process 16 int8 values per 128-bit register. The kernel computes 4 output columns at once with 4 independent accumulators.\n- Compiled with gcc -O3 -mcpu=cortex-a9 -mfpu=neon.\n\nHow GOP/s is calculated: GOP/s = 2 × N³ / time.\n- An N×N by N×N matmul has N² outputs, and each output is a dot product of length N, so it does N³ multiply-accumulates (MACs).\n- Each MAC counts as 2 operations (one multiply and one add), so the total is 2 × N³ operations.\n- Dividing by the measured time in seconds gives operations per second; dividing by 10⁹ gives GOP/s.\n- Example, N = 128: 2 × 128³ = 4,194,304 operations in 689.52 µs = 4,194,304 / 0.00068952 s = 6.083 × 10⁹ operations per second = 6.083 GOP/s.",
+    "table": "Matrix size,Tile,Time (µs),MACs (N³),Operations (2·N³),GOP/s\n32×32,32,36.53,32768,65536,1.794\n64×64,32,105.09,262144,524288,4.989\n128×128,32,689.52,2097152,4194304,6.083\n256×256,32,5042.71,16777216,33554432,6.654\n512×512,32,38625.32,134217728,268435456,6.950"
+  },
+  {
+    "id": "matmul-perf-analysis",
+    "title": "Matmul performance analysis (summary) — stale, 90 MHz build",
+    "date": "2026-11-05",
+    "owner": "Jerry",
+    "status": "Stale · old 90 MHz build · full write-up on GitHub",
+    "url": "https://github.com/j3rryhu/matmul-accel",
+    "description": "Stale: this analysis is from the old 90 MHz build. The accelerator now runs at 75 MHz; current numbers are in \"Matmul throughput by tile size (75 MHz)\".\n\nSummary of PERF_ANALYSIS.md for the 16×16 int8 weight-stationary systolic array at 90 MHz on the DE1-SoC. Full write-up in the matmul-accel repo (link above).\n\nMain conclusion: performance is bound by the software tiling scheme. Each matmul the hardware runs multiplies a tk×tn slab of W by a tn×tm slab of X into a tk×tm output patch. A bigger output patch gets more MACs from each byte sent over the bridge (density), so the same problem needs fewer matmuls and fewer bytes.\n\n- A 256×256 matmul tiled into 128×128 output tiles runs at the same speed as a single 128×128 matmul: same tile shape, density and utilization. Tiling it as one 256×256 output (W in 256×64 strips, X in 64×256 strips) halves the matmul count and roughly doubles throughput.\n- A 128×128 matmul is capped at 64 MAC/B because a tile cannot be larger than the matrix. 256×256 reaches 128 MAC/B, the limit set by the 64 KB output canvas, so 512×512 plateaus at the same density.\n- Peak compute is 46.1 GOP/s (2 ops × 256 PEs × 90 MHz). Best measured compute-only throughput is 40.15 GOP/s, about 87% of peak.\n- The gap comes from 16 head and 16 tail cycles per weight block: utilization = tm / (tm + 32), 80% at tm = 128 and 88.9% at tm = 256. Overlapping the next block's head with the previous block's tail would bring utilization close to 100%; that needs the output path to hold two blocks in flight.\n\nTiling schemes for a 256×256 matmul (16.78 MMAC):",
+    "table": "Scheme,tk / tn / tm,Matmuls,Density (MAC/B),Operand bytes,Projected (GOP/s),Measured (GOP/s)\nA: 64×256 strips,64 / 64 / 256,16,51.2,320 KB,10.60,10.47\nB: 128×128 tiles,128 / 128 / 128,8,64.0,256 KB,11.94,—\nC: 256×256 square,256 / 64 / 256,4,128.0,128 KB,18.36,18.30"
+  },
+  {
+    "id": "matmul-throughput",
+    "title": "Matmul throughput: CPU baseline vs systolic array",
+    "date": "2026-11-05",
+    "owner": "Jerry",
+    "status": "Measured on DE1-SoC",
+    "url": "/files/data/matmul-throughput-2026-11-05.csv",
+    "description": "Throughput of an N×N int8 matmul at each size, CPU baseline (matmul_baseline_mt: 2 threads, NEON SIMD kernel, 32×32 tiling) next to the systolic array (matmul_accel_cli). Speedup = systolic array GOP/s ÷ CPU baseline GOP/s.",
+    "table": "Matrix size,CPU baseline (GOP/s),Systolic array (GOP/s),Speedup\n64×64,4.989,6.043,1.21×\n128×128,6.083,11.392,1.87×\n256×256,6.654,18.302,2.75×\n512×512,6.950,18.884,2.72×"
+  },
+  {
+    "id": "matmul-tile-sweep-75mhz",
+    "title": "Matmul throughput by tile size (75 MHz)",
+    "date": "2026-11-16",
+    "owner": "Jerry",
+    "status": "Measured on DE1-SoC · 75 MHz",
+    "url": "/files/data/matmul-tile-sweep-75mhz-2026-11-16.csv",
+    "description": "One matmul per row: a tk×tn weight block times a tn×tm input block, DMA both ways, with bias off and on.\nCompute GOP/s counts array compute only. End-to-end GOP/s also includes the input DMA, the bias stage and the output DMA.",
+    "table": "tk,tm,tn,Bias,In (B),Out (B),In (MB/s),Bias (µs),Out (MB/s),Compute (µs),MAC/B,Compute GOP/s,End-to-end GOP/s\n16,16,16,off,512,256,52.7,0.8,63.2,3.4,8.0,2.40,0.46\n16,16,16,on,512,256,52.8,4.0,62.9,3.4,8.0,2.42,0.39\n32,32,32,off,2048,1024,95.7,0.8,252.2,5.5,16.0,11.81,2.06\n32,32,32,on,2048,1024,96.1,4.0,252.8,5.5,16.0,11.94,1.88\n64,64,64,off,8192,4096,124.6,0.8,468.1,24.4,32.0,21.52,5.26\n64,64,64,on,8192,4096,124.1,5.2,469.2,24.4,32.0,21.51,5.03\n128,128,16,off,4096,16384,115.7,0.8,533.7,20.3,64.0,25.84,6.01\n128,128,16,on,4096,16384,115.7,6.4,533.5,20.3,64.0,25.84,5.65\n128,128,32,off,8192,16384,124.5,0.8,533.5,38.2,64.0,27.45,7.74\n128,128,32,on,8192,16384,124.2,6.5,534.4,38.2,64.0,27.43,7.42\n128,128,64,off,16384,16384,128.3,0.8,533.5,74.1,64.0,28.31,8.99\n128,128,64,on,16384,16384,128.4,7.5,534.6,73.4,64.0,28.57,8.77\n128,128,128,off,32768,16384,128.8,0.8,533.5,145.7,64.0,28.78,9.71\n128,128,128,on,32768,16384,129.3,6.4,534.2,145.2,64.0,28.88,9.63"
+  },
+  {
+    "id": "mnn-inference-timing",
+    "title": "TinyViT full-model inference timing",
+    "date": "2026-11-03",
+    "owner": "Stephanie (Yixin)",
+    "status": "Two single-run measurements · synthetic inputs",
+    "url": "/files/data/tinyvit-inference-timing-2026-11-03.csv",
+    "description": "DE1-SoC, two CPU threads, one selected attention MatMul offloaded to the FPGA. Each row is one inference with no warm-up; times exclude model loading and preprocessing. The mixed results do not establish a reliable full-model speedup or accuracy on real images. Source: MNN / TinyViT FPGA integration report linked in this tab.",
+    "table": "Synthetic input,CPU only (ms),One MatMul offloaded (ms),Change vs CPU,FPGA jobs\nZeros,1265.17,1192.56,5.74% faster,320\nNonuniform tensor,1230.07,1263.35,2.71% slower,320"
+  },
+  {
+    "id": "mnn-integration-report",
+    "title": "MNN / TinyViT FPGA integration report",
+    "date": "2026-11-03",
+    "owner": "Stephanie (Yixin)",
+    "status": "Functional integration demonstrated · full report on GitHub",
+    "url": "https://github.com/PlutoPuppy/mnn-fpga/blob/main/docs/tinyvit-fpga-integration-report.md",
+    "description": "Full TinyViT inference completed on the DE1-SoC with the selected Q × Kᵀ attention MatMul (/layers.3/blocks.1/attn/MatMul_output_0) offloaded to the FPGA; the rest of the model runs on the CPU. Each of 10 heads multiplies a 49 × 32 Q matrix by a 32 × 49 transposed K matrix. Software splits this into 16 × 16 × 16 FPGA jobs, pads the final row and column tiles, and accumulates the two reduction tiles on the CPU. Both synthetic inputs completed and six physical matrix tests passed. The compute-share estimate compares useful MACs for this operation with Microsoft's published TinyViT-21M at 224 × 224; it is not a measured operation count for the deployed MNN model.",
+    "table": "Q × Kᵀ detail,Value,Calculation or meaning\nFull Q shape,1 × 10 × 49 × 32,Batch × heads × query positions × channels\nFull Kᵀ shape,1 × 10 × 32 × 49,Batch × heads × channels × key positions\nOutput per head,49 × 49,2401 values\nNumber of heads,10,24010 output values total\nFPGA job tile,16 × 16 × 16,Output rows × output columns × reduction depth\nQ row tiles per head,4,ceil(49 / 16)\nKᵀ column tiles per head,4,ceil(49 / 16)\nReduction tiles per head,2,ceil(32 / 16)\nPadded dimensions per head,64 × 64 × 32,4 × 16 rows and columns; 2 × 16 reduction\nFinal row and column tiles,1 valid position each,49 − 3 × 16\nOutput tile positions per head,16,4 × 4\nFPGA jobs per head,32,4 × 4 × 2\nTotal FPGA jobs,320,10 heads × 32 jobs\nUseful multiply-accumulates,768320,49 × 49 × 32 × 10\nPadded multiply-accumulates,1310720,320 × 16 × 16 × 16\nUseful work fraction,58.62%,768320 / 1310720\nPublished TinyViT-21M 224 total,about 4.3 billion MACs,Microsoft model-zoo reference\nSelected Q × Kᵀ share of total,about 0.018%,768320 / 4.3 billion × 100"
+  },
+  {
+    "id": "poster",
+    "title": "ViT-FPGA poster reference",
+    "date": "2026-11-03",
+    "owner": "Team",
+    "status": "Reference copy; submission unconfirmed",
+    "url": "/files/posters/vit-fpga-poster-reference.png",
+    "description": "Supplied project artifact."
+  },
+  {
+    "id": "presentation",
+    "title": "TinyViT DE1-SoC final presentation",
+    "date": "2026-11-03",
+    "owner": "Team",
+    "status": "Reference copy; submission unconfirmed",
+    "url": "/files/presentations/tinyvit-de1-soc-final-presentation.pdf",
+    "description": "Supplied project artifact."
+  },
+  {
+    "id": "proposal",
+    "title": "Project proposal",
+    "date": "2026-11-03",
+    "owner": "Team",
+    "status": "Reference copy; submission unconfirmed",
+    "url": "/files/submissions/ece496-project-proposal.pdf",
+    "description": "Supplied project artifact."
+  },
+  {
+    "id": "quartus-resource-utilization",
+    "title": "Quartus resource utilization: systolic array",
+    "date": "2026-11-05",
+    "owner": "Jerry",
+    "status": "Quartus fitter summary · timing models: Final",
+    "description": "FPGA resource usage of the systolic array build on the DE1-SoC (Cyclone V), from the Quartus fitter summary.",
+    "table": "Resource,Used,Available,Utilization\nLogic utilization (ALMs),23759,32070,74%\nTotal registers,25737,—,—\nTotal pins,107,457,23%\nTotal virtual pins,0,—,—\nTotal block memory bits,2155472,4065280,53%\nTotal DSP blocks,2,87,2%\nTotal HSSI RX PCSs,0,—,—\nTotal HSSI PMA RX deserializers,0,—,—\nTotal HSSI TX PCSs,0,—,—\nTotal HSSI PMA TX serializers,0,—,—\nTotal PLLs,1,6,17%\nTotal DLLs,1,4,25%"
+  },
+  {
+    "id": "tiffany-cpu-live-demo",
+    "title": "Tiffany — USB camera / CPU-only live classification demo",
+    "date": "2026-11-17",
+    "owner": "Tiffany (Yiling)",
+    "status": "Functional demo; hybrid integration and stage timing measurements pending",
+    "url": "/files/videos/tiffany-cpu-live-demo.mp4",
+    "description": "Arducam-1080P-HDR connected to DE1-SoC Linux, with TinyViT inference on the ARM Cortex-A9 HPS and live camera/prediction display on Windows. This earlier recording uses Windows preprocessing and is not evidence of an entirely HPS-local pipeline. Added November 17, 2026; exact capture date and source commit were not recorded. No FPGA offload or measured end-to-end speedup is claimed by this video."
+  }
+]

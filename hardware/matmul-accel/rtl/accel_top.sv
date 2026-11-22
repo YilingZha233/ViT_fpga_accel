@@ -1,0 +1,913 @@
+// Top level: Avalon-MM slave <-> ctrl_rf_rf register file + weight/input/output
+// buffer RAMs. Address decode is a flat range check per region; each region's
+// local (offset-subtracted) address feeds that region's RAM/regfile directly.
+//
+// input_dispatch is wired up: input_buffer's read side and pe_array's
+// activation-in edge are both driven by it. weight_ctrl (weight_buffer_32_bank
+// -> pe_array's per-row weight-load ports, block-by-block) is wired up too, and drives
+// input_dispatch's per-block-row preload/compute-start handshake directly
+// (matmul_start is the only software trigger left; everything past that
+// is sequenced by weight_ctrl). output_loader is wired up too: it drives
+// pe_array's b_en, reads p_out, and read-modify-write accumulates into
+// output_buffer_32_bank (ARRAY_COLS independent banks, one per array column - see
+// output_buffer_32_bank.v; the per-bank output_buffer leaf RAM itself is
+// still a placeholder depth pending the real generated IP).
+//
+// NB: the datapath is square-only - pe_array's a_in/a_en lanes are
+// indexed by column while its p_out/b_en lanes are indexed by row, and
+// output_loader banks per p_out lane while naming that axis ARRAY_COLS.
+// Every width lines up only while ARRAY_ROWS == ARRAY_COLS. Resizing the
+// array means changing both together.
+//
+// Requires rdl/ctrl_reg.sv/ctrl_rf_rf.sv in the same compile fileset.
+`timescale 1ps/1ps
+
+module accel_top #(
+    parameter AVS_ADDR_WIDTH = 32,
+    parameter AVS_DATA_WIDTH = 128,   // byte-lane mux below assumes 32
+    parameter PE_DATA_WIDTH  = 8,    // activation/weight operand width (int8)
+    parameter ACC_DATA_WIDTH = 32,   // pe_array accumulator width - kept wider
+                                      // than PE_DATA_WIDTH so a full contraction
+                                      // sum of int8 x int8 products can't
+                                      // overflow before software rescales it
+                                      // back down under the int8 quantization
+                                      // scheme (see pe.v)
+    parameter ARRAY_ROWS     = 16,  // must equal ARRAY_COLS - the array is
+    parameter ARRAY_COLS     = 16,  // square-only, see header note
+    // GELU lookup table ($readmemh, 256 int8 entries) for output_loader's
+    // ACT_CFG.gelu_en stage. Relative paths resolve against the
+    // simulator's / Quartus project's working directory - tb/Makefile
+    // overrides this with an absolute path.
+    parameter GELU_LUT_FILE  = "activation/example/gelu_int8.hex"
+)(
+    input                                  clk,
+    input                                  reset_n,      // active-low
+
+    // Avalon-MM slave
+    input        [AVS_ADDR_WIDTH-1:0]      avs_address,
+    input                                  avs_read,
+    input                                  avs_write,
+    input        [AVS_DATA_WIDTH-1:0]      avs_writedata,
+    input        [AVS_DATA_WIDTH/8-1:0]    avs_byteenable,
+    input        [10:0]                    avs_burstcount,
+    output logic [AVS_DATA_WIDTH-1:0]      avs_readdata,
+    output logic                           avs_readdatavalid,
+    output logic                           avs_waitrequest
+);
+
+    // ============================================================
+    // Memory map (byte addresses)
+    // ============================================================
+    localparam logic [31:0] CTRL_BASE = 32'h0000_0000, CTRL_SIZE = 32'h0000_0100;
+    localparam logic [31:0] BBUF_BASE = 32'h0000_0800, BBUF_SIZE = 32'h0000_0400; // bias_buffer (256 x int32), 10-bit addr, write-only
+    localparam logic [31:0] WBUF_BASE = 32'h0000_1000, WBUF_SIZE = 32'h0000_4000; // weight_buffer (banked), 14-bit addr
+    localparam logic [31:0] IBUF_BASE = 32'h0000_5000, IBUF_SIZE = 32'h0000_4000; // input_buffer (banked),  14-bit addr
+    localparam logic [31:0] OBUF_BASE = 32'h0000_9000, OBUF_SIZE = 32'h0001_0000; // output_buffer (256x256 int8 canvas), 16-bit addr
+    // psum_buffer (raw 32-bit partial sums) is internal to output_loader - no window
+
+    // ---- buffer geometry ----
+    // Per-bank depths are fixed by the generated RAM IP; the bank *count*
+    // follows the array, so the flat (software-visible) address width of
+    // each banked buffer scales with ARRAY_ROWS/ARRAY_COLS. The weight and
+    // input buffers use 1KB banks, which at 16 banks fill each 16KB window
+    // exactly - enough for one 128x128 W times a 128x128 X (8 rows of 128
+    // weights per weight bank, 8 contraction bands x 128 columns per input
+    // bank). The output buffer uses 4KB banks of int8 results, filling its
+    // 64KB window: a 256x256 canvas, i.e. 2x2 tiles of 128x128 results (see
+    // below). The psum buffer behind it holds only the current tile's raw
+    // 32-bit sums, internal only: 1024-slot (4KB) banks, 64KB - one tile of
+    // up to 128x128 (ceil(WEIGHT_ROWS/16) * INPUT_COLS <= 1024).
+    // Growing a depth or the array means growing the matching *_SIZE
+    // window above (the check below catches a window that is too small).
+    localparam int WBUF_BANK_ADDR_WIDTH = 10;  // weight_buffer IP depth = 1024 entries/bank
+    localparam int IBUF_BANK_ADDR_WIDTH = 10;  // input_buffer IP depth  = 1024 entries/bank
+    localparam int OBUF_BANK_ADDR_WIDTH = 12;  // output_buffer IP depth = 4096 bytes/bank
+    localparam int PSUM_BANK_ADDR_WIDTH = 10;  // psum_buffer IP depth   = 1024 32-bit slots/bank
+    localparam int WBUF_ADDR_WIDTH      = $clog2(ARRAY_ROWS) + WBUF_BANK_ADDR_WIDTH;
+    localparam int IBUF_ADDR_WIDTH      = $clog2(ARRAY_ROWS) + IBUF_BANK_ADDR_WIDTH;
+    localparam int OBUF_ADDR_WIDTH      = $clog2(ARRAY_COLS) + OBUF_BANK_ADDR_WIDTH;
+
+    // ---- bias buffer ----
+    // one int32 bias per canvas row (accumulator units), banked like the
+    // output canvas (row R in bank R % ARRAY_ROWS) - see bias_buffer_32_bank.v
+    localparam int BIAS_ROWS            = 256;
+    localparam int BBUF_BANK_ADDR_WIDTH = $clog2(BIAS_ROWS / ARRAY_ROWS);
+    localparam int BBUF_ADDR_WIDTH      = $clog2(BIAS_ROWS * ACC_DATA_WIDTH / 8);  // byte address
+
+    // ---- output canvas ----
+    // output_buffer holds one int8 canvas, CANVAS_WIDTH bytes wide (the
+    // whole result's column count; 0 means INPUT_COLS, the untiled case),
+    // rows padded to whole host words; psum_buffer holds this matmul's tile
+    // as raw 32-bit sums between contraction blocks. See the output_buffer
+    // and psum_buffer sections.
+
+    // Each window must cover every bank, or the top banks are unreachable
+    // from the host. Elaboration-time check; fails the build, not the sim.
+    generate
+        if ((1 << WBUF_ADDR_WIDTH) > WBUF_SIZE) begin : g_wbuf_window_too_small
+            WBUF_SIZE_smaller_than_weight_buffer u_err();
+        end
+        if ((1 << IBUF_ADDR_WIDTH) > IBUF_SIZE) begin : g_ibuf_window_too_small
+            IBUF_SIZE_smaller_than_input_buffer u_err();
+        end
+        if ((1 << OBUF_ADDR_WIDTH) > OBUF_SIZE) begin : g_obuf_window_too_small
+            OBUF_SIZE_smaller_than_output_buffer u_err();
+        end
+        if ((1 << BBUF_ADDR_WIDTH) > BBUF_SIZE) begin : g_bbuf_window_too_small
+            BBUF_SIZE_smaller_than_bias_buffer u_err();
+        end
+    endgenerate
+
+    // The buffers' Avalon-facing ports are AVS_DATA_WIDTH wide, so a host
+    // access moves BYTES_PER_WORD bytes and the byte address advances by
+    // BYTES_PER_WORD. Those ports are addressed in words; the core-facing
+    // ports stay byte-addressed (weight_loader/input_dispatch read one byte
+    // per cycle, output_loader writes one int8 result per cycle).
+    localparam int BYTES_PER_WORD  = AVS_DATA_WIDTH / PE_DATA_WIDTH;
+    localparam int WORD_SHIFT      = $clog2(BYTES_PER_WORD);
+    localparam int WBUF_WADDR_WIDTH      = WBUF_ADDR_WIDTH      - WORD_SHIFT;
+    localparam int IBUF_BANK_WADDR_WIDTH = IBUF_BANK_ADDR_WIDTH - WORD_SHIFT;
+    localparam int OBUF_BANK_RADDR_WIDTH = OBUF_BANK_ADDR_WIDTH - WORD_SHIFT;
+    localparam int IBUF_WADDR_WIDTH      = IBUF_ADDR_WIDTH      - WORD_SHIFT;
+    localparam int OBUF_RADDR_WIDTH      = OBUF_ADDR_WIDTH      - WORD_SHIFT;
+
+    wire sel_ctrl = (avs_address >= CTRL_BASE) && (avs_address < CTRL_BASE + CTRL_SIZE);
+    wire sel_bbuf = (avs_address >= BBUF_BASE) && (avs_address < BBUF_BASE + BBUF_SIZE);
+    wire sel_wbuf = (avs_address >= WBUF_BASE) && (avs_address < WBUF_BASE + WBUF_SIZE);
+    wire sel_ibuf = (avs_address >= IBUF_BASE) && (avs_address < IBUF_BASE + IBUF_SIZE);
+    wire sel_obuf = (avs_address >= OBUF_BASE) && (avs_address < OBUF_BASE + OBUF_SIZE);
+    logic accepted;
+    logic burst_busy;
+    logic sel_ctrl_r;
+    logic sel_obuf_r;
+    logic rd_burst_on;
+
+    logic [10:0] burst_cnt_buf;
+    logic [AVS_ADDR_WIDTH-1:0] addr_buf;
+    wire  read_valid;
+    wire  rf_data_valid;     // a CTRL beat is in ctrl_rdata this cycle (ctrl_rf section)
+    logic obuf_data_valid;   // an OBUF beat is in obuf_ext_q this cycle (output_buffer section)
+    logic obuf_pipe_busy;    // OBUF beats still in the remap/RAM pipeline
+    wire [AVS_DATA_WIDTH-1:0] read_data;   // the beat's data (read mux, further down)
+    assign read_valid = rf_data_valid || obuf_data_valid;
+    // One read in flight at a time (maximumPendingReadTransactions = 1): a
+    // new read stalls a cycle before it is accepted, and burst_busy holds
+    // off every command for the rest of a multi-beat burst. An output-buffer
+    // read also returns each beat OBUF_RD_LAT cycles after the FSM counts it
+    // out (its address goes through buf_addr_remap first), so obuf_pipe_busy
+    // holds off the next command until those beats have drained - a CTRL
+    // beat can never overtake or land on top of a late OBUF beat.
+    assign avs_waitrequest = (avs_read && !accepted) || burst_busy || obuf_pipe_busy;
+
+    // An Avalon master holds write/address/writedata stable until
+    // avs_waitrequest drops, so avs_write on its own means "a write is
+    // being presented", not "a write was accepted" - using it directly as
+    // a write enable commits the access once per stalled cycle. That is
+    // invisible for the buffers (the same word is rewritten to the same
+    // address) but not for a pulse field: a CONTROL.matmul_start write
+    // stalled behind an in-flight burst read fires the start strobe once
+    // for every cycle the master held it. Gate every write enable on the
+    // accepting cycle instead. No combinational loop here - avs_waitrequest
+    // depends only on avs_read/accepted/burst_busy, never on the write
+    // enables.
+    wire avs_write_accepted = avs_write && !avs_waitrequest;
+
+    always@(posedge clk)begin
+        if(!reset_n)begin
+            burst_cnt_buf <= 0;
+            accepted <= 0;
+            burst_busy <= 0;
+            addr_buf <= 0;
+            sel_ctrl_r <= 0;
+            sel_obuf_r <= 0;
+            rd_burst_on <= 0;
+            avs_readdatavalid <= 0;
+            avs_readdata <= 0;
+        end
+        else begin
+            // Avalon forbids readdatavalid in the cycle a read is accepted
+            // (at least one cycle of latency), so every beat leaves through
+            // these registers one cycle after read_valid/read_data. They
+            // update every cycle, not only while rd_burst_on is set -
+            // otherwise the last beat's valid stays high after the burst.
+            avs_readdatavalid <= read_valid;
+            avs_readdata      <= read_data;
+
+            if(avs_read && !rd_burst_on && !obuf_pipe_busy)begin
+                addr_buf <= avs_address + BYTES_PER_WORD;
+                accepted <= 1;
+                burst_cnt_buf <= avs_burstcount == 0 ? 1 : avs_burstcount;
+                sel_ctrl_r <= sel_ctrl;
+                sel_obuf_r <= sel_obuf;
+                rd_burst_on <= 1;
+            end
+
+            if(accepted)begin
+                burst_busy <= 1;
+            end
+
+            if(rd_burst_on)begin
+                burst_cnt_buf <= burst_cnt_buf - 1;
+                addr_buf <= addr_buf + BYTES_PER_WORD;
+                if(burst_cnt_buf == 1)begin
+                    sel_ctrl_r <= 0;
+                    sel_obuf_r <= 0;
+                    rd_burst_on <= 0;
+                    accepted <= 0;
+                    burst_busy <= 0;
+                end
+            end
+        end
+    end
+
+    // ============================================================
+    // Host-side address remap for the two banked write-only buffers.
+    // Software writes each matrix as ONE contiguous row-major image, every
+    // row zero-padded up to a whole number of AVS_DATA_WIDTH words:
+    //   WBUF: W (K x N), row pitch = roundup(WEIGHT_COLS,    BYTES_PER_WORD)
+    //   IBUF: X (N x M), row pitch = roundup(INPUT_MAX_ADDR, BYTES_PER_WORD)
+    // Every host word then belongs to one row, so it lands whole in one
+    // bank at a word-aligned offset: one RAM write per host write, no
+    // stall. buf_addr_remap scatters row r to bank r % ARRAY_ROWS using
+    // those live register values, so WEIGHT_COLS / INPUT_MAX_ADDR must be
+    // programmed BEFORE the buffers are written. Inside a bank, rows keep
+    // the padded pitch (weight_ctrl's block/band bases use it too). Writes
+    // land two cycles after they are accepted (see buf_addr_remap.v).
+    // output_buffer is READ through the same remap - see its section below.
+    // ============================================================
+    logic [15:0] weight_cols;           // N: weight cols (from ctrl_rf, below)
+    logic [9:0]  input_max_addr;        // M: per-band input reads (from ctrl_rf, below)
+    logic [15:0] input_cols;            // M: output columns per matmul (from ctrl_rf, below) - the tile width
+    logic [15:0] canvas_width;          // CANVAS_WIDTH: whole result's columns, 0 = INPUT_COLS (from ctrl_rf, below)
+
+    localparam int WBUF_ROWW_WIDTH = WBUF_BANK_ADDR_WIDTH - WORD_SHIFT + 1;  // row pitch up to a whole bank
+    localparam int IBUF_ROWW_WIDTH = IBUF_BANK_ADDR_WIDTH - WORD_SHIFT + 1;
+
+    wire [16:0] wbuf_pitch_words = ({1'b0, weight_cols} + (BYTES_PER_WORD-1)) >> WORD_SHIFT;
+    wire [IBUF_BANK_ADDR_WIDTH:0] ibuf_pitch_words =
+        ({1'b0, input_max_addr[IBUF_BANK_ADDR_WIDTH-1:0]} + (BYTES_PER_WORD-1)) >> WORD_SHIFT;
+
+    // ============================================================
+    // weight_buffer - banked ARRAY_ROWS-ways (one bank per PE row, see
+    // weight_buffer_32_bank.v). Write-only from Avalon through the remap;
+    // the read side is driven by weight_ctrl, every bank in parallel
+    // ============================================================
+    wire [WBUF_WADDR_WIDTH-1:0] wbuf_host_waddr = (avs_address - WBUF_BASE) >> WORD_SHIFT;
+    wire [WBUF_WADDR_WIDTH-1:0] wbuf_wraddress;
+    wire [AVS_DATA_WIDTH-1:0]   wbuf_wdata;
+    wire                        wbuf_wren;
+
+    buf_addr_remap #(
+        .DATA_WIDTH       (AVS_DATA_WIDTH),
+        .HOST_WADDR_WIDTH (WBUF_WADDR_WIDTH),
+        .ROWW_WIDTH       (WBUF_ROWW_WIDTH),
+        .BANK_SEL_WIDTH   ($clog2(ARRAY_ROWS)),
+        .BANK_WADDR_WIDTH (WBUF_BANK_ADDR_WIDTH - WORD_SHIFT)
+    ) u_wbuf_remap (
+        .clk        (clk),
+        .host_waddr (wbuf_host_waddr),
+        .host_wdata (avs_writedata),
+        .host_wren  (avs_write_accepted && sel_wbuf),
+        .row_words  (wbuf_pitch_words[WBUF_ROWW_WIDTH-1:0]),
+        .bank_waddr (wbuf_wraddress),
+        .bank_wdata (wbuf_wdata),
+        .bank_wren  (wbuf_wren)
+    );
+
+    logic [ARRAY_ROWS*WBUF_BANK_ADDR_WIDTH-1:0] wbuf_rdaddress;
+    logic                                       wbuf_rden;
+    logic [ARRAY_ROWS-1:0]                      wbuf_byteenable;
+    logic [ARRAY_ROWS*PE_DATA_WIDTH-1:0]        wbuf_q;
+
+    weight_buffer_32_bank #(
+        .ARRAY_ROWS      (ARRAY_ROWS),
+        .DATA_WIDTH      (PE_DATA_WIDTH),
+        .BANK_ADDR_WIDTH (WBUF_BANK_ADDR_WIDTH),
+        .WR_DATA_WIDTH   (AVS_DATA_WIDTH)
+    ) u_weight_buffer (
+        .clock         (clk),
+        .data          (wbuf_wdata),
+        .rdaddress     (wbuf_rdaddress),
+        .rden          (wbuf_rden),
+        .rd_byteenable (wbuf_byteenable),  // per-row masking, driven by weight_loader
+        .wraddress     (wbuf_wraddress),
+        .wren          (wbuf_wren),
+        .q             (wbuf_q)
+    );
+
+    // ============================================================
+    // input_buffer - write side from Avalon through the remap, read side
+    // driven by input_dispatch
+    // ============================================================
+    wire [IBUF_WADDR_WIDTH-1:0] ibuf_host_waddr = (avs_address - IBUF_BASE) >> WORD_SHIFT;
+    wire [IBUF_WADDR_WIDTH-1:0] ibuf_wraddress;
+    wire [AVS_DATA_WIDTH-1:0]   ibuf_wdata;
+    wire                        ibuf_wren;
+
+    buf_addr_remap #(
+        .DATA_WIDTH       (AVS_DATA_WIDTH),
+        .HOST_WADDR_WIDTH (IBUF_WADDR_WIDTH),
+        .ROWW_WIDTH       (IBUF_ROWW_WIDTH),
+        .BANK_SEL_WIDTH   ($clog2(ARRAY_ROWS)),
+        .BANK_WADDR_WIDTH (IBUF_BANK_ADDR_WIDTH - WORD_SHIFT)
+    ) u_ibuf_remap (
+        .clk        (clk),
+        .host_waddr (ibuf_host_waddr),
+        .host_wdata (avs_writedata),
+        .host_wren  (avs_write_accepted && sel_ibuf),
+        .row_words  (ibuf_pitch_words[IBUF_ROWW_WIDTH-1:0]),
+        .bank_waddr (ibuf_wraddress),
+        .bank_wdata (ibuf_wdata),
+        .bank_wren  (ibuf_wren)
+    );
+
+    logic [ARRAY_ROWS*PE_DATA_WIDTH-1:0]       ibuf_q;
+    logic [ARRAY_ROWS*IBUF_BANK_ADDR_WIDTH-1:0] ibuf_rdaddress;
+    logic                                      ibuf_rden;
+    logic [ARRAY_ROWS-1:0]                     ibuf_byteenable;
+
+    input_buffer_32_bank #(
+        .ARRAY_ROWS      (ARRAY_ROWS),
+        .DATA_WIDTH      (PE_DATA_WIDTH),
+        .BANK_ADDR_WIDTH (IBUF_BANK_ADDR_WIDTH),
+        .WR_DATA_WIDTH   (AVS_DATA_WIDTH)
+    ) u_input_buffer (
+        .clock         (clk),
+        .data          (ibuf_wdata),
+        .rdaddress     (ibuf_rdaddress),
+        .rden          (ibuf_rden),
+        .rd_byteenable (ibuf_byteenable),  // per-row masking, driven by input_dispatch (see input_dispatch.v)
+        .wraddress     (ibuf_wraddress),
+        .wren          (ibuf_wren),
+        .q             (ibuf_q)
+    );
+
+    // ============================================================
+    // output_buffer - banked ARRAY_COLS-ways (one bank per p_out lane, see
+    // output_buffer_32_bank.v), holding the int8 output canvas: the
+    // finished results the host reads. output_loader writes each int8 at
+    // its canvas position (and reads it back for ACT_CFG.prev_int8); Avalon
+    // reads through a single muxed external port, read-only. The raw 32-bit
+    // partial sums between contraction blocks live in psum_buffer (below),
+    // which the host never sees.
+    //
+    // The canvas is W = CANVAS_WIDTH bytes wide - the column count of the
+    // whole result, which a tiled result spreads over several matmuls - or
+    // INPUT_COLS when CANVAS_WIDTH is 0 (one untiled matmul). Rows are
+    // padded to a whole AVS_DATA_WIDTH word, pitch = roundup(W,
+    // BYTES_PER_WORD), and canvas row R lives in bank R % ARRAY_ROWS at byte
+    // offset (R / ARRAY_ROWS)*pitch + column. output_loader writes there
+    // with the pitch latched at matmul_start; host reads go through the same
+    // buf_addr_remap as the WBUF/IBUF writes, fed that same latched pitch,
+    // so software reads the canvas as ONE contiguous row-major int8 image,
+    // row R at OBUF_BASE + R*pitch, with the layout it was written with.
+    //
+    // Read timing: the remap puts two register stages ahead of the RAM, so
+    // each OBUF beat reaches obuf_ext_q OBUF_RD_LAT cycles after the read
+    // FSM counts it out (rd_burst_on && sel_obuf_r). obuf_beat_sr delays
+    // the count by exactly that much to make obuf_data_valid, and
+    // obuf_pipe_busy holds off the next command until it drains (see
+    // avs_waitrequest).
+    // ============================================================
+    localparam int OBUF_ROWW_WIDTH = OBUF_BANK_RADDR_WIDTH + 1;  // row pitch up to a whole bank
+    localparam int OBUF_RD_LAT     = 2;   // buf_addr_remap pipeline depth - must be >= 2 (see obuf_beat_sr)
+
+    wire [15:0] obuf_canvas_cols = (canvas_width != 16'd0) ? canvas_width : input_cols;
+    wire [OBUF_BANK_ADDR_WIDTH:0] obuf_pitch_words =
+        ({1'b0, obuf_canvas_cols[OBUF_BANK_ADDR_WIDTH-1:0]} + (BYTES_PER_WORD-1)) >> WORD_SHIFT;
+    logic [OBUF_ROWW_WIDTH-1:0]   obuf_rd_pitch_words;   // obuf_pitch_words latched at matmul_start (TILE_CFG latch below)
+
+    // host word fetched this cycle: the burst's first word while the read
+    // is still stalled, then one word per delivering cycle (one word past
+    // the end of the burst is fetched too - harmless, never marked valid)
+    wire                        obuf_host_rden  = (avs_read && sel_obuf) || (rd_burst_on && sel_obuf_r);
+    wire [OBUF_RADDR_WIDTH-1:0] obuf_host_raddr =
+        (rd_burst_on ? (addr_buf - OBUF_BASE) : (avs_address - OBUF_BASE)) >> WORD_SHIFT;
+    wire                        obuf_ext_rden;
+    wire [OBUF_RADDR_WIDTH-1:0] obuf_ext_rdaddress;
+    logic [AVS_DATA_WIDTH-1:0]  obuf_ext_q;
+
+    buf_addr_remap #(
+        .DATA_WIDTH       (1),     // address only - nothing rides along on a read
+        .HOST_WADDR_WIDTH (OBUF_RADDR_WIDTH),
+        .ROWW_WIDTH       (OBUF_ROWW_WIDTH),
+        .BANK_SEL_WIDTH   ($clog2(ARRAY_COLS)),
+        .BANK_WADDR_WIDTH (OBUF_BANK_RADDR_WIDTH)
+    ) u_obuf_remap (
+        .clk        (clk),
+        .host_waddr (obuf_host_raddr),
+        .host_wdata (1'b0),
+        .host_wren  (obuf_host_rden),
+        .row_words  (obuf_rd_pitch_words),
+        .bank_waddr (obuf_ext_rdaddress),
+        .bank_wdata (),
+        .bank_wren  (obuf_ext_rden)
+    );
+
+    // Beat i is counted out in the i-th delivering cycle. Its word was
+    // fetched one cycle earlier (in the stall cycle, for i = 0), leaves the
+    // remap OBUF_RD_LAT cycles after that, and the RAM one cycle later - so
+    // it sits in obuf_ext_q exactly OBUF_RD_LAT cycles after it was counted.
+    // The fetch enable itself is not the valid: it also fires while the
+    // read is stalled and one word past the end of the burst.
+    logic [OBUF_RD_LAT-1:0] obuf_beat_sr;
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n)
+            obuf_beat_sr <= '0;
+        else
+            obuf_beat_sr <= {obuf_beat_sr[OBUF_RD_LAT-2:0], rd_burst_on && sel_obuf_r};
+    end
+    assign obuf_data_valid = obuf_beat_sr[OBUF_RD_LAT-1];
+    assign obuf_pipe_busy  = |obuf_beat_sr;
+
+    logic        output_loader_busy;
+    logic [ARRAY_COLS-1:0]                        obuf_bank_rden;
+    logic [ARRAY_COLS*OBUF_BANK_RADDR_WIDTH-1:0]  obuf_bank_rdaddress;
+    logic [ARRAY_COLS*AVS_DATA_WIDTH-1:0]         obuf_bank_q;
+    logic [ARRAY_COLS-1:0]                        obuf_bank_wren;
+    logic [ARRAY_COLS*OBUF_BANK_ADDR_WIDTH-1:0]   obuf_bank_waddr;
+    logic [ARRAY_COLS*PE_DATA_WIDTH-1:0]          obuf_bank_wdata;
+
+    output_buffer_32_bank #(
+        .DATA_WIDTH      (PE_DATA_WIDTH),
+        .NUM_BANKS       (ARRAY_COLS),
+        .BANK_ADDR_WIDTH (OBUF_BANK_ADDR_WIDTH),
+        .RD_DATA_WIDTH   (AVS_DATA_WIDTH)
+    ) u_output_buffer (
+        .clock          (clk),
+
+        .busy           (output_loader_busy),
+        .bank_rden      (obuf_bank_rden),
+        .bank_rdaddress (obuf_bank_rdaddress),
+        .bank_q         (obuf_bank_q),
+        .bank_wren      (obuf_bank_wren),
+        .bank_waddr     (obuf_bank_waddr),
+        .bank_wdata     (obuf_bank_wdata),
+
+        .ext_rden       (obuf_ext_rden),
+        .ext_rdaddress  (obuf_ext_rdaddress),
+        .ext_q          (obuf_ext_q)
+    );
+
+    // ============================================================
+    // psum_buffer - this matmul's tile as raw 32-bit running sums, relative
+    // to the tile rather than the canvas: tile row k in bank k % ARRAY_ROWS
+    // (the same bank as its canvas row, since the tile starts on a bank
+    // boundary), at slot (k / ARRAY_ROWS)*INPUT_COLS + column - no padding,
+    // nothing reads it in words. Every tile reuses the same slots, so the
+    // buffer only has to hold one tile, however big the canvas.
+    // output_loader is its only reader and writer: every contraction pass
+    // but an element's last read-modify-writes it (as does the last with
+    // ACT_CFG.out_raw), and a use_prev_out matmul continues from it - which
+    // therefore has to be the same tile, with no matmul that keeps raw sums
+    // in between. Not host-visible. See psum_buffer_32_bank.v.
+    // ============================================================
+    logic [ARRAY_COLS-1:0]                        psum_bank_rden;
+    logic [ARRAY_COLS*PSUM_BANK_ADDR_WIDTH-1:0]   psum_bank_rdaddress;
+    logic [ARRAY_COLS*ACC_DATA_WIDTH-1:0]         psum_bank_q;
+    logic [ARRAY_COLS-1:0]                        psum_bank_wren;
+    logic [ARRAY_COLS*PSUM_BANK_ADDR_WIDTH-1:0]   psum_bank_waddr;
+    logic [ARRAY_COLS*ACC_DATA_WIDTH-1:0]         psum_bank_wdata;
+
+    psum_buffer_32_bank #(
+        .DATA_WIDTH      (ACC_DATA_WIDTH),
+        .NUM_BANKS       (ARRAY_COLS),
+        .BANK_ADDR_WIDTH (PSUM_BANK_ADDR_WIDTH)
+    ) u_psum_buffer (
+        .clock          (clk),
+        .bank_rden      (psum_bank_rden),
+        .bank_rdaddress (psum_bank_rdaddress),
+        .bank_q         (psum_bank_q),
+        .bank_wren      (psum_bank_wren),
+        .bank_waddr     (psum_bank_waddr),
+        .bank_wdata     (psum_bank_wdata)
+    );
+
+    // ============================================================
+    // ctrl_rf_rf - control/status register file
+    // ============================================================
+    // `valid` must mark the cycle the access actually COMMITS, not merely
+    // the cycle the master is presenting it. avs_waitrequest is still high
+    // on the first cycle of a read (`accepted` is not set yet), so a raw
+    // `avs_read && sel_ctrl` term asserts the register file's read strobe
+    // one cycle before the master samples avs_readdata. That is harmless
+    // for a plain status bit, but it destroys a read-to-clear field:
+    // STATUS.done would be cleared on that stalled cycle and read back as 0
+    // on the next. The accepted-read path (rd_burst_on && sel_ctrl_r) is
+    // already asserted from the delivering cycle onward - and covers every
+    // beat of a burst - so use only that for reads.
+    wire        ctrl_valid = (avs_write_accepted && sel_ctrl) || (rd_burst_on && sel_ctrl_r);
+    logic [AVS_DATA_WIDTH-1:0] ctrl_rdata;
+    // ctrl_valid is the register file's *access* strobe, so it also covers
+    // writes - it must not be reused as the read-data valid or every CTRL
+    // write puts a phantom beat on the read channel. A write issued the
+    // cycle after a read is accepted (which Avalon allows) then looks like
+    // that read's valid stretching one cycle longer than the burst.
+    assign      rf_data_valid = rd_burst_on && sel_ctrl_r;
+
+    logic        matmul_start;          // pulse: latch WEIGHT_ROWS/WEIGHT_COLS, reset block position
+    logic [15:0] weight_rows;           // K: weight rows (contraction dimension)
+    // weight_cols / input_max_addr / input_cols are declared above, with the buffer remap
+    logic [15:0] output_scale;          // Q0.16 rescale factor (value/65536, range [0,1)) for pe_array's ACC_WIDTH accumulator
+    logic [14:0] tile_r_cfg;            // TILE_CFG.tile_r       - output tile row index (see the tile latch below)
+    logic [14:0] tile_c_cfg;            // TILE_CFG.tile_c       - output tile column index
+    logic [15:0] tile_rows_cfg;         // TILE_ROWS             - tile grid height, 0 = WEIGHT_ROWS
+    logic [15:0] tile_cols_cfg;         // TILE_COLS             - tile grid width,  0 = INPUT_COLS
+    logic        use_prev_out_cfg;      // TILE_CFG.use_prev_out - accumulate onto the canvas from the first block
+    logic        weight_ctrl_busy;      // weight_ctrl/weight_loader busy, for STATUS.busy
+    logic        weight_ctrl_done;      // PULSE: last block committed and its input band fully streamed in
+    logic        bias_en_cfg;           // ACT_CFG.bias_en      - add the row's int32 bias on the final pass
+    logic        gelu_en_cfg;           // ACT_CFG.gelu_en      - GELU the final int8 result
+    logic        prev_int8_cfg;         // ACT_CFG.prev_int8    - use_prev_out adds onto the int8 result, not raw sums
+    logic        out_raw_cfg;           // ACT_CFG.out_raw      - leave raw 32-bit sums, no int8 result
+
+    // STATUS.busy: weight/input side sequencing OR output_loader still
+    // draining the last block's psums (weight_ctrl_done can go high a few
+    // pipeline cycles before output_loader finishes writing that block's
+    // results - see output_loader.v's header note on drain latency).
+    wire        matmul_busy = weight_ctrl_busy || output_loader_busy;
+
+    // STATUS.done is a read-to-clear sticky bit in the register file (see
+    // rdl/ctrl_reg.rdl), set by a one-cycle write-enable pulse. Producing
+    // that pulse takes two steps, because neither half of "the matmul
+    // finished" is sufficient on its own:
+    //
+    //   - weight_ctrl's done pulse only means every block has been
+    //     *committed*. output_loader is typically still draining the last
+    //     block's psums for a few more cycles at that point (see
+    //     output_loader.v's header note on drain latency), so firing here
+    //     would let software start reading output_buffer before the final
+    //     results have landed.
+    //   - output_loader's own done pulses once *per committed block*, not
+    //     once per matmul, so it can't be used directly either.
+    //
+    // So: latch weight_ctrl's pulse, then emit a single completion pulse on
+    // the rising edge of "all blocks committed AND the drain has finished".
+    logic all_blocks_committed;
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n)
+            all_blocks_committed <= 1'b0;
+        else if (matmul_start)          // a new matmul supersedes the old result
+            all_blocks_committed <= 1'b0;
+        else if (weight_ctrl_done)
+            all_blocks_committed <= 1'b1;
+    end
+
+    wire  matmul_complete = all_blocks_committed && !output_loader_busy;
+    logic matmul_complete_d;
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) matmul_complete_d <= 1'b0;
+        else          matmul_complete_d <= matmul_complete;
+    end
+
+    // one cycle, once per matmul
+    wire matmul_done_pulse = matmul_complete && !matmul_complete_d;
+
+    ctrl_rf_rf #(
+        .ADDR_OFFSET (CTRL_BASE),
+        .ADDR_WIDTH  (AVS_ADDR_WIDTH),
+        .DATA_WIDTH  (AVS_DATA_WIDTH)
+    ) u_ctrl_rf (
+        .clk                     (clk),
+        .resetn                  (reset_n),
+
+        .CONTROL_matmul_start_q        (matmul_start),
+
+        .WEIGHT_ROWS_value_q     (weight_rows),
+        .WEIGHT_COLS_value_q     (weight_cols),
+        .INPUT_MAX_ADDR_value_q  (input_max_addr),
+        .INPUT_COLS_value_q      (input_cols),  // TODO: drive compute datapath (not yet consumed by input_dispatch)
+        .OUTPUT_SCALE_value_q    (output_scale),  // Q0.16 rescale factor, consumed by output_loader's requantize stage
+        .TILE_CFG_tile_r_q       (tile_r_cfg),
+        .TILE_CFG_tile_c_q       (tile_c_cfg),
+        .TILE_CFG_use_prev_out_q (use_prev_out_cfg),
+        .CANVAS_WIDTH_value_q    (canvas_width),
+        .TILE_ROWS_value_q       (tile_rows_cfg),
+        .TILE_COLS_value_q       (tile_cols_cfg),
+        .ACT_CFG_bias_en_q       (bias_en_cfg),
+        .ACT_CFG_gelu_en_q       (gelu_en_cfg),
+        .ACT_CFG_prev_int8_q     (prev_int8_cfg),
+        .ACT_CFG_out_raw_q       (out_raw_cfg),
+
+        .STATUS_busy_wdata              (matmul_busy),
+        .STATUS_done_we                 (matmul_done_pulse),
+        .STATUS_done_wdata              (1'b1),
+
+        .valid  (ctrl_valid),
+        .read   (avs_read),
+        .addr   (avs_address),
+        .wdata  (avs_writedata),
+        .wmask  (avs_byteenable),
+        .rdata  (ctrl_rdata)
+    );
+
+    // ============================================================
+    // Output tile placement (TILE_CFG), latched at matmul_start so software
+    // can program the next tile while this matmul runs.
+    //
+    // A matmul writes its WEIGHT_ROWS x INPUT_COLS result into the canvas
+    // with its top-left corner at canvas row tile_r*TILE_ROWS, column
+    // tile_c*TILE_COLS. TILE_ROWS/TILE_COLS are the tile grid's size - 0
+    // means this matmul's own WEIGHT_ROWS/INPUT_COLS, i.e. equal tiles - so
+    // an edge tile can be smaller than the grid and still land on it. The
+    // row offset must be a multiple of ARRAY_ROWS so that PE row r keeps
+    // writing bank r (the low bits are dropped). The column offset can be
+    // anything: int8 results are written one byte at their exact canvas
+    // position, raw sums one slot at theirs. Nothing checks that the tile lies
+    // inside the canvas or its grid cell. The row pitches are latched here
+    // too, for output_loader's write addresses: the int8 canvas pitch, and
+    // the psum pitch, INPUT_COLS (psum_buffer holds just this tile).
+    //
+    // use_prev_out makes the matmul's first contraction block accumulate
+    // into what the canvas already holds, instead of overwriting it, so a
+    // contraction too long for one matmul can be split across several.
+    //
+    // ACT_CFG (bias_en/gelu_en/prev_int8/out_raw) and max_n_blk_idx - the
+    // last contraction block's index, which is what output_loader's
+    // final_blk compares against - are latched here too. out_raw marks
+    // every matmul of a split contraction but the last (raw 32-bit sums
+    // stay in psum_buffer); prev_int8 makes a use_prev_out matmul add onto
+    // the int8 result in output_buffer instead. max_n_blk_idx is
+    // weight_ctrl's num_n_blocks - 1, from the same WEIGHT_COLS weight_ctrl
+    // latches on this same matmul_start.
+    // ============================================================
+    // operands cut to the canvas index width: no canvas row or column index
+    // inside the buffer needs more, and it keeps both multipliers small
+    localparam int CANVAS_IDX_W = OBUF_BANK_ADDR_WIDTH + 1;
+    // tile grid size: TILE_ROWS/TILE_COLS, or this matmul's own size when 0
+    wire [15:0] tile_rows_eff = (tile_rows_cfg != 16'd0) ? tile_rows_cfg : weight_rows;
+    wire [15:0] tile_cols_eff = (tile_cols_cfg != 16'd0) ? tile_cols_cfg : input_cols;
+    logic [15:0]                     tile_row_blk;    // first canvas row / ARRAY_ROWS
+    logic [OBUF_BANK_ADDR_WIDTH-1:0] tile_col_off;    // first canvas column (elements)
+    logic                            use_prev_out;
+    logic [OBUF_BANK_ADDR_WIDTH:0]   obuf_row_pitch;  // int8 canvas row pitch (bytes), for output_loader
+    logic [PSUM_BANK_ADDR_WIDTH:0]   psum_row_pitch;  // psum row pitch (slots) = INPUT_COLS, the tile width, for output_loader
+    logic                            bias_en;
+    logic                            gelu_en;
+    logic                            prev_int8;
+    logic                            out_raw;
+    logic [15:0]                     max_n_blk_idx;   // last contraction block index of this matmul
+    always_ff @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            tile_row_blk   <= '0;
+            tile_col_off   <= '0;
+            use_prev_out   <= 1'b0;
+            obuf_row_pitch <= '0;
+            psum_row_pitch <= '0;
+            obuf_rd_pitch_words <= '0;
+            bias_en        <= 1'b0;
+            gelu_en        <= 1'b0;
+            prev_int8      <= 1'b0;
+            out_raw        <= 1'b0;
+            max_n_blk_idx  <= '0;
+        end
+        else if (matmul_start) begin
+            tile_row_blk   <= (tile_r_cfg[CANVAS_IDX_W-1:0] * tile_rows_eff[CANVAS_IDX_W-1:0]) >> $clog2(ARRAY_ROWS);
+            tile_col_off   <= tile_c_cfg[CANVAS_IDX_W-1:0] * tile_cols_eff[CANVAS_IDX_W-1:0];
+            use_prev_out   <= use_prev_out_cfg;
+            obuf_row_pitch <= obuf_pitch_words << WORD_SHIFT;
+            psum_row_pitch <= input_cols[PSUM_BANK_ADDR_WIDTH:0];
+            obuf_rd_pitch_words <= obuf_pitch_words[OBUF_ROWW_WIDTH-1:0];   // host read remap row length
+            bias_en        <= bias_en_cfg;
+            gelu_en        <= gelu_en_cfg;
+            prev_int8      <= prev_int8_cfg;
+            out_raw        <= out_raw_cfg;
+            max_n_blk_idx  <= ((weight_cols + ARRAY_COLS - 1) >> $clog2(ARRAY_COLS)) - 1;
+        end
+    end
+
+    // ============================================================
+    // Avalon read mux / waitrequest
+    // ============================================================
+    // OBUF and CTRL beats never share a cycle: a CTRL read cannot start
+    // while obuf_pipe_busy, and an OBUF beat is only ever valid then.
+    assign read_data = obuf_data_valid ? obuf_ext_q :
+                       rf_data_valid   ? ctrl_rdata : '0;
+
+    // ============================================================
+    // input_dispatch - streams input_buffer into the array's left edge,
+    // one ARRAY_ROWS-row band at a time, driven by weight_ctrl below
+    // ============================================================
+    wire [ARRAY_ROWS*PE_DATA_WIDTH-1:0] a_out;
+    wire [ARRAY_ROWS-1:0]               a_en;
+
+    wire [IBUF_BANK_ADDR_WIDTH-1:0] input_band_base_addr;  // weight_ctrl -> input_dispatch: current block's per-bank base offset
+    wire       input_band_start;      // weight_ctrl -> input_dispatch: pulse, begin preloading that band
+    wire       input_compute_start;   // weight_ctrl -> input_dispatch: pulse, begin streaming into pe_array
+    wire       input_fifos_primed;    // input_dispatch -> weight_ctrl: all row FIFOs hold >=1 element
+    wire       input_band_done;       // input_dispatch -> weight_ctrl: current band fully drained
+
+    input_dispatch #(
+        .ARRAY_ROWS      (ARRAY_ROWS),
+        .DATA_WIDTH      (PE_DATA_WIDTH),
+        .IBUF_ADDR_WIDTH (IBUF_BANK_ADDR_WIDTH)
+    ) u_input_dispatch (
+        .clock          (clk),
+        .rst_n          (reset_n),
+
+        .ibuf_q         (ibuf_q),
+        .ibuf_rdaddress (ibuf_rdaddress),
+        .ibuf_rden      (ibuf_rden),
+        .ibuf_byteenable(ibuf_byteenable),
+
+        .a_out          (a_out),
+        .a_en           (a_en),
+
+        .i_max_addr       (input_max_addr[IBUF_BANK_ADDR_WIDTH-1:0]),
+        .i_band_base_addr (input_band_base_addr),
+        .i_band_start     (input_band_start),
+        .i_start_compute  (input_compute_start),
+        .fifos_primed     (input_fifos_primed),
+        .band_done        (input_band_done)
+    );
+
+    // ============================================================
+    // weight_ctrl - walks the weight matrix column-major (contraction-
+    // dimension blocks fast, output-dimension blocks slow) as
+    // ARRAY_ROWS x ARRAY_COLS
+    // blocks, prefetching each into pe_array and driving input_dispatch's
+    // per-block handshake; matmul_start is the only software trigger,
+    // everything else is sequenced internally
+    // ============================================================
+    wire [ARRAY_ROWS*$clog2(ARRAY_ROWS*ARRAY_COLS)-1:0] w_addr;  // one port per PE row
+    wire [ARRAY_ROWS*PE_DATA_WIDTH-1:0]                 w_data;
+    wire                                      w_en;
+    wire                                      w_load;
+    wire [15:0]                              committed_n_blk_idx;    // -> output_loader
+    wire [15:0]                              committed_k_blk_idx;
+    wire                                      committed_first_k_blk; // -> output_loader
+    wire [$clog2(ARRAY_ROWS+1)-1:0]         valid_row;
+    wire [$clog2(ARRAY_COLS+1)-1:0]         valid_col;
+
+    weight_ctrl #(
+        .DATA_WIDTH      (PE_DATA_WIDTH),
+        .ARRAY_ROWS      (ARRAY_ROWS),
+        .ARRAY_COLS      (ARRAY_COLS),
+        .WBUF_BANK_ADDR_WIDTH (WBUF_BANK_ADDR_WIDTH),
+        .ROW_ALIGN       (BYTES_PER_WORD),
+        .IBUF_ADDR_WIDTH (IBUF_BANK_ADDR_WIDTH),
+        .DIM_WIDTH       (16)
+    ) u_weight_ctrl (
+        .clk               (clk),
+        .rst_n             (reset_n),
+
+        .matmul_start      (matmul_start),
+        .weight_rows       (weight_rows),
+        .weight_cols       (weight_cols),
+
+        .busy              (weight_ctrl_busy),
+        .done              (weight_ctrl_done),
+
+        .wbuf_rden         (wbuf_rden),
+        .wbuf_rdaddress    (wbuf_rdaddress),
+        .wbuf_byteenable   (wbuf_byteenable),
+        .wbuf_q            (wbuf_q),
+
+        .w_addr            (w_addr),
+        .w_data            (w_data),
+        .w_en              (w_en),
+        .w_load            (w_load),
+
+        .input_max_addr       (input_max_addr[IBUF_BANK_ADDR_WIDTH-1:0]),
+        .input_band_start     (input_band_start),
+        .input_band_base_addr (input_band_base_addr),
+        .input_compute_start  (input_compute_start),
+        .input_fifos_primed   (input_fifos_primed),
+        .input_band_done      (input_band_done),
+
+        .output_drain_busy    (output_loader_busy),  // no commit until the previous block has left the array
+
+        .committed_n_blk_idx   (committed_n_blk_idx),
+        .committed_k_blk_idx   (committed_k_blk_idx),
+        .committed_first_k_blk (committed_first_k_blk),
+
+        .valid_row          (valid_row),
+        .valid_col          (valid_col)
+    );
+
+    // ============================================================
+    // bias_buffer - banked ARRAY_ROWS-ways (one bank per output_loader lane,
+    // see bias_buffer_32_bank.v), one int32 bias per canvas row (256 rows,
+    // accumulator units), written by the host as a contiguous image of
+    // little-endian int32s at BBUF_BASE (bias[R] at byte 4*R), read by
+    // output_loader on the final contraction pass when ACT_CFG.bias_en.
+    // Write-only from the host; writes land in the accepting cycle. One bus
+    // word = 4 consecutive rows, which the wrapper sends to their 4 banks
+    // directly, so no remap is needed.
+    // ============================================================
+    localparam int BBUF_WADDR_WIDTH = BBUF_ADDR_WIDTH - WORD_SHIFT;   // host word address
+    wire [BBUF_WADDR_WIDTH-1:0]                   bbuf_host_waddr = (avs_address - BBUF_BASE) >> WORD_SHIFT;
+    wire [ARRAY_ROWS-1:0]                         bbuf_rden;
+    wire [ARRAY_ROWS*BBUF_BANK_ADDR_WIDTH-1:0]    bbuf_rdaddress;
+    wire [ARRAY_ROWS*ACC_DATA_WIDTH-1:0]          bbuf_q;
+
+    bias_buffer_32_bank #(
+        .ARRAY_ROWS      (ARRAY_ROWS),
+        .DATA_WIDTH      (ACC_DATA_WIDTH),
+        .BANK_ADDR_WIDTH (BBUF_BANK_ADDR_WIDTH),
+        .WR_DATA_WIDTH   (AVS_DATA_WIDTH)
+    ) u_bias_buffer (
+        .clock         (clk),
+        .data          (avs_writedata),
+        .wraddress     (bbuf_host_waddr),
+        .wren          (avs_write_accepted && sel_bbuf),
+        .wr_byteenable (avs_byteenable),
+        .rdaddress     (bbuf_rdaddress),
+        .rden          (bbuf_rden),
+        .q             (bbuf_q)
+    );
+
+    // ============================================================
+    // output_loader - drives pe_array's b_en, reads p_out, and read-
+    // modify-write accumulates into output_buffer_32_bank
+    // ============================================================
+    wire [ARRAY_COLS-1:0]                pe_b_en;
+    wire [ARRAY_COLS*ACC_DATA_WIDTH-1:0] pe_p_out;
+    wire                                 output_loader_done;
+
+    output_loader #(
+        .DATA_WIDTH     (PE_DATA_WIDTH),
+        .ACC_WIDTH      (ACC_DATA_WIDTH),
+        .ARRAY_COLS     (ARRAY_COLS),
+        .ARRAY_ROWS     (ARRAY_ROWS),
+        .ROW_ADDR_WIDTH (OBUF_BANK_ADDR_WIDTH),
+        .PSUM_ADDR_WIDTH (PSUM_BANK_ADDR_WIDTH),
+        .RD_DATA_WIDTH  (AVS_DATA_WIDTH),
+        .DIM_WIDTH       (16),
+        .BIAS_ADDR_WIDTH (BBUF_BANK_ADDR_WIDTH),
+        .GELU_LUT_FILE   (GELU_LUT_FILE)
+    ) u_output_loader (
+        .clock (clk),
+        .rst_n (reset_n),
+
+        .p_in  (pe_p_out),
+        .b_en  (pe_b_en),
+
+        .a_en_last             (a_en[ARRAY_ROWS-1]),   // last row's a_en - see output_loader.v header
+        .total_rows            (input_cols[OBUF_BANK_ADDR_WIDTH-1:0]),
+        .committed_k_blk_idx   (committed_k_blk_idx),
+        .committed_n_blk_idx   (committed_n_blk_idx),
+        .committed_first_k_blk (committed_first_k_blk),
+        .max_n_blk_idx         (max_n_blk_idx),
+        .out_raw               (out_raw),
+        .prev_int8             (prev_int8),
+        .bias_en               (bias_en),
+        .gelu_en               (gelu_en),
+
+        .tile_row_blk   (tile_row_blk),
+        .tile_col_off   (tile_col_off),
+        .use_prev_out   (use_prev_out),
+        .row_pitch      (psum_row_pitch),
+        .row_pitch8     (obuf_row_pitch),
+
+        .output_scale   (output_scale),
+
+        .weight_rows    (valid_row),
+        .weight_cols    (valid_col),
+
+        .psum_rden      (psum_bank_rden),
+        .psum_rdaddress (psum_bank_rdaddress),
+        .psum_q         (psum_bank_q),
+        .psum_wren      (psum_bank_wren),
+        .psum_waddr     (psum_bank_waddr),
+        .psum_wdata     (psum_bank_wdata),
+
+        .obuf_rden      (obuf_bank_rden),
+        .obuf_rdaddress (obuf_bank_rdaddress),
+        .obuf_q         (obuf_bank_q),
+        .obuf_wren      (obuf_bank_wren),
+        .obuf_waddr     (obuf_bank_waddr),
+        .obuf_wdata     (obuf_bank_wdata),
+
+        .bbuf_rden      (bbuf_rden),
+        .bbuf_rdaddress (bbuf_rdaddress),
+        .bbuf_q         (bbuf_q),
+
+        .busy (output_loader_busy),
+        .done (output_loader_done)
+    );
+
+    // ============================================================
+    // pe_array - activation side driven by input_dispatch, weight side
+    // driven by weight_ctrl, partial-sum-out side driven by output_loader
+    // ============================================================
+    pe_array #(
+        .DATA_WIDTH (PE_DATA_WIDTH),
+        .ACC_WIDTH  (ACC_DATA_WIDTH),
+        .ARRAY_ROWS (ARRAY_ROWS),
+        .ARRAY_COLS (ARRAY_COLS)
+    ) u_pe_array (
+        .clk     (clk),
+        .rst_n   (reset_n),
+        .a_in    (a_out),
+        .a_en    (a_en),
+        .b_en    (pe_b_en),
+        .w_addr  (w_addr),
+        .w_data  (w_data),
+        .w_en    (w_en),
+        .w_load  (w_load),
+        .a_out   (),
+        .p_out   (pe_p_out)
+    );
+
+endmodule

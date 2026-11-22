@@ -1,0 +1,42 @@
+[    0.007058] CPU0: Spectre v2: firmware did not set auxiliary control register IBE bit, system vulnerable
+[    0.026634] /cpus/cpu@0 missing clock-frequency property
+[    0.026794] /cpus/cpu@1 missing clock-frequency property
+[    0.039224] CPU1: Spectre v2: firmware did not set auxiliary control register IBE bit, system vulnerable
+[    3.452195] pci-host-generic 4010000000.pcie: can't claim ECAM area [mem 0x10000000-0x1fffffff]: address conflict with pcie@10000000 [mem 0x10000000-0x3efeffff]
+The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+Model: /fp32.mnn
+Input: image [1,3,224,224] FP32 NCHW
+Input mode: camera pipe on HPS
+mode=cpu-fp32 frame=1 top1=0 torch=0 cosine=0.99999607 max_abs=0.007693 counters={"id":1,"pack_ms":0.224,"infer_ms":10940.4,"service_ms":10940.9,"jobs":0,"layers":0,"runner_peak_kib":203772}
+mode=cpu-fp32 frame=2 top1=701 torch=701 cosine=0.99999312 max_abs=0.018301 counters={"id":2,"pack_ms":0.219008,"infer_ms":25002.6,"service_ms":25002.8,"jobs":0,"layers":0,"runner_peak_kib":203772}
+mode=cpu-fp32 frame=3 top1=0 torch=0 cosine=0.99999607 max_abs=0.007693 counters={"id":3,"pack_ms":0.232992,"infer_ms":11113.6,"service_ms":11113.8,"jobs":0,"layers":0,"runner_peak_kib":203772}
+The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+Model: /mixed.mnn
+Input: image [1,3,224,224] FP32 NCHW
+Input mode: camera pipe on HPS
+mode=cpu-mixed frame=1 top1=0 torch=0 cosine=0.99997550 max_abs=0.015516 counters={"id":1,"pack_ms":0.222992,"infer_ms":10668.5,"service_ms":10668.8,"jobs":0,"layers":0,"runner_peak_kib":202036}
+mode=cpu-mixed frame=2 top1=701 torch=701 cosine=0.99994412 max_abs=0.054487 counters={"id":2,"pack_ms":0.224,"infer_ms":10716.3,"service_ms":10716.5,"jobs":0,"layers":0,"runner_peak_kib":202036}
+mode=cpu-mixed frame=3 top1=0 torch=0 cosine=0.99997550 max_abs=0.015516 counters={"id":3,"pack_ms":0.224,"infer_ms":10559.9,"service_ms":10560.1,"jobs":0,"layers":0,"runner_peak_kib":202036}
+The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+Native candidate: /layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted K=192 N=768
+Native candidate: /layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted K=768 N=192
+Native plan: 2 linear operations, 0 resident pairs
+Model: /mixed.mnn
+Input: image [1,3,224,224] FP32 NCHW
+Input mode: camera pipe on HPS
+mode=hybrid-unfused-oracle frame=1 top1=0 torch=0 cosine=0.99997536 max_abs=0.015747 counters={"id":1,"pack_ms":0.232,"infer_ms":11506.3,"service_ms":11506.8,"jobs":207,"layers":2,"runner_peak_kib":202780,"native":{"abi":"NI82","operations":2,"local_feedback_bytes":0,"hidden_roundtrip_bytes_avoided":0,"fused_pairs":0,"skipped_runtime_operations":0,"pending":-1,"layers":[{"name":"/layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted","K":192,"N":768,"tile_m":80,"tile_n":128,"tile_k":192,"operand_b_bytes":65536,"fused_second":-1},{"name":"/layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted","K":768,"N":192,"tile_m":16,"tile_n":80,"tile_k":768,"operand_b_bytes":65536,"fused_second":-1}]}}
+mode=hybrid-unfused-oracle frame=2 top1=701 torch=701 cosine=0.99994414 max_abs=0.054113 counters={"id":2,"pack_ms":0.222,"infer_ms":11466.2,"service_ms":11466.5,"jobs":207,"layers":2,"runner_peak_kib":202828,"native":{"abi":"NI82","operations":2,"local_feedback_bytes":0,"hidden_roundtrip_bytes_avoided":0,"fused_pairs":0,"skipped_runtime_operations":0,"pending":-1,"layers":[{"name":"/layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted","K":192,"N":768,"tile_m":80,"tile_n":128,"tile_k":192,"operand_b_bytes":65536,"fused_second":-1},{"name":"/layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted","K":768,"N":192,"tile_m":16,"tile_n":80,"tile_k":768,"operand_b_bytes":65536,"fused_second":-1}]}}
+mode=hybrid-unfused-oracle frame=3 top1=0 torch=0 cosine=0.99997536 max_abs=0.015747 counters={"id":3,"pack_ms":0.224992,"infer_ms":11333.3,"service_ms":11333.6,"jobs":207,"layers":2,"runner_peak_kib":202828,"native":{"abi":"NI82","operations":2,"local_feedback_bytes":0,"hidden_roundtrip_bytes_avoided":0,"fused_pairs":0,"skipped_runtime_operations":0,"pending":-1,"layers":[{"name":"/layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted","K":192,"N":768,"tile_m":80,"tile_n":128,"tile_k":192,"operand_b_bytes":65536,"fused_second":-1},{"name":"/layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted","K":768,"N":192,"tile_m":16,"tile_n":80,"tile_k":768,"operand_b_bytes":65536,"fused_second":-1}]}}
+The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+Native candidate: /layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted K=192 N=768
+Native candidate: /layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted K=768 N=192
+Native resident pair: /layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted -> /layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted; activation LUT FNV1a=2817358034; graph chain=7
+Native plan: 2 linear operations, 1 resident pairs
+Model: /mixed.mnn
+Input: image [1,3,224,224] FP32 NCHW
+Input mode: camera pipe on HPS
+mode=hybrid-resident-oracle frame=1 top1=0 torch=0 cosine=0.99997536 max_abs=0.015747 counters={"id":1,"pack_ms":0.220992,"infer_ms":11670.8,"service_ms":11671.1,"jobs":207,"layers":2,"runner_peak_kib":202940,"native":{"abi":"NI82","operations":2,"local_feedback_bytes":1806336,"hidden_roundtrip_bytes_avoided":1204224,"fused_pairs":1,"skipped_runtime_operations":4,"pending":-1,"layers":[{"name":"/layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted","K":192,"N":768,"tile_m":80,"tile_n":128,"tile_k":192,"operand_b_bytes":65536,"fused_second":1},{"name":"/layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted","K":768,"N":192,"tile_m":16,"tile_n":80,"tile_k":768,"operand_b_bytes":65536,"fused_second":-1}]}}
+mode=hybrid-resident-oracle frame=2 top1=701 torch=701 cosine=0.99994414 max_abs=0.054113 counters={"id":2,"pack_ms":0.22,"infer_ms":11649.8,"service_ms":11650.1,"jobs":207,"layers":2,"runner_peak_kib":202944,"native":{"abi":"NI82","operations":2,"local_feedback_bytes":1806336,"hidden_roundtrip_bytes_avoided":1204224,"fused_pairs":1,"skipped_runtime_operations":4,"pending":-1,"layers":[{"name":"/layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted","K":192,"N":768,"tile_m":80,"tile_n":128,"tile_k":192,"operand_b_bytes":65536,"fused_second":1},{"name":"/layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted","K":768,"N":192,"tile_m":16,"tile_n":80,"tile_k":768,"operand_b_bytes":65536,"fused_second":-1}]}}
+mode=hybrid-resident-oracle frame=3 top1=0 torch=0 cosine=0.99997536 max_abs=0.015747 counters={"id":3,"pack_ms":0.327008,"infer_ms":11550.3,"service_ms":11550.7,"jobs":207,"layers":2,"runner_peak_kib":202948,"native":{"abi":"NI82","operations":2,"local_feedback_bytes":1806336,"hidden_roundtrip_bytes_avoided":1204224,"fused_pairs":1,"skipped_runtime_operations":4,"pending":-1,"layers":[{"name":"/layers.1/blocks.1/mlp/fc1/Add_output_0__matmul_converted","K":192,"N":768,"tile_m":80,"tile_n":128,"tile_k":192,"operand_b_bytes":65536,"fused_second":1},{"name":"/layers.1/blocks.1/mlp/fc2/Add_output_0__matmul_converted","K":768,"N":192,"tile_m":16,"tile_n":80,"tile_k":768,"operand_b_bytes":65536,"fused_second":-1}]}}
+ARM_21M_PASS code=0
+[  174.071001] reboot: Power down

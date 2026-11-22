@@ -1,0 +1,118 @@
+[
+  {
+    "title": "Project update on MNN backend and WIKI page",
+    "date": "2026-11-03",
+    "memberId": "member-sy",
+    "update": "Updated the wiki page to be vit-fpga-wiki.pages.dev and created github repo to allow members to edit website content through github: https://github.com/PlutoPuppy/vit-fpga-wiki\nMNN backend update: offload the first QK matmul from first attention module: [1,10,49,32] * [1,10,32,49] and speed up the end to end inference by 5.7%. Next step will try to offload more. See github here for details: https://github.com/PlutoPuppy/mnn-fpga",
+    "id": "project-update-on-mnn-backend-and-wiki-page"
+  },
+  {
+    "id": "stephanie-integration-20261103",
+    "title": "Selected attention MatMul integrated with MNN",
+    "memberId": "member-sy",
+    "date": "2026-11-03",
+    "update": "Report-confirmed: TinyViT runs with /layers.3/blocks.1/attn/MatMul_output_0 offloaded to Jerry’s 16×16 array. Inputs [1,10,49,32] × [1,10,32,49] use 320 padded 16×16×16 PIO jobs; reduction tiles are accumulated on the CPU. The final full-SoC image runs at 80 MHz. Two synthetic inputs completed; six physical matrix smoke cases passed. Single-run end-to-end timings were 5.74% faster for zeros and 2.71% slower for nonuniform input, so consistent speedup and dataset accuracy remain unproven. Next: repeated matched CPU/offload runs, overhead profiling, real-image numerical checks, then evaluate additional offloads. Implementation-plan ownership also includes design alternatives and the Jan–Feb matched MNN baseline.",
+    "links": [
+      {
+        "label": "Integration report and measurements",
+        "url": "https://github.com/PlutoPuppy/mnn-fpga/blob/main/docs/tinyvit-fpga-integration-report.md"
+      }
+    ],
+    "evidenceReviewed": true
+  },
+  {
+    "id": "tiffany-live-demo-20261117",
+    "title": "USB camera setup and HPS-only live classification",
+    "memberId": "member-ty",
+    "date": "2026-11-17",
+    "update": "USB camera and HPS-only live classification (Nov 17, 2026)\n\n- Completed USB camera peripheral setup on the DE1-SoC and verified live image capture through Linux/UVC.\n- Created a live image-classification demo with TinyViT inference running on the HPS CPU, displaying the camera feed and predicted ImageNet class labels on the connected computer.\n- Added a recording of the earlier CPU-only inference demo to ECE496 Files & Data. That recording uses Windows preprocessing; it does not document the subsequent HPS-local preprocessing work.\n\nNext steps\n- Integrate all team members’ software and FPGA hardware code to run end-to-end live image classification on the hybrid CPU–FPGA design, keeping image capture and preprocessing on HPS.\n- Build and validate a timing measurement tool to separate capture/decode, preprocessing, CPU inference, FPGA computation, HPS–FPGA transfer/control, and result-display overhead. Record per-frame measurements and end-to-end latency to identify bottlenecks and compare the HPS-only and hybrid pipelines under matched settings.",
+    "links": [
+      {
+        "label": "Earlier CPU-only inference demo",
+        "url": "/files/videos/tiffany-cpu-live-demo.mp4"
+      }
+    ]
+  },
+  {
+    "id": "tiffany-plan-20261103",
+    "title": "Camera/Linux and verification work plan",
+    "memberId": "member-ty",
+    "date": "2026-11-03",
+    "update": "Planned responsibilities from Inplementation Plan.docx and its Gantt chart: camera and Linux integration during Nov 2026–Jan 2027; own the Test and Verification section and SyRs appendix. Next: map each requirement to a test, setup, acceptance criterion and evidence; establish a reproducible Linux/UVC image-capture path and MNN preprocessing smoke test, with prerecorded inputs as fallback. Completion of these items is not evidenced by the supplied plan; hardware capture and requirement results remain to be recorded.",
+    "links": [
+      {
+        "label": "Implementation schedule",
+        "url": "https://vit-fpga-wiki.pages.dev/#/gantt"
+      }
+    ],
+    "evidenceReviewed": true
+  },
+  {
+    "id": "update-20261103-jerry",
+    "memberId": "member-jc",
+    "date": "2026-11-03",
+    "update": "Main includes contiguous host address remapping, tiled output canvas and software tiling tests. Next: capture board pass logs and resolve full-canvas DMA address-window limits.",
+    "links": [
+      {
+        "label": "Implementation evidence",
+        "url": "https://github.com/j3rryhu/matmul-soc/commit/4b749cedf88742dc999267999cd234186eb26bf7"
+      }
+    ],
+    "createdAt": "2026-11-03T19:10:20.431Z",
+    "updatedAt": "2026-11-03T19:10:20.431Z",
+    "title": "2026-11-03 member-jc"
+  },
+  {
+    "id": "update-20261103-winnie",
+    "memberId": "member-wn",
+    "date": "2026-11-03",
+    "update": "Completed softmax reference, fixed-point baseline, bit-exact standalone RTL verification and standalone timing near 90 MHz. Bias/GELU readout prototype implemented. Next: reconcile with tiled matmul, calibrate scales and validate the full SoC.",
+    "links": [
+      {
+        "label": "Implementation evidence",
+        "url": "https://github.com/PlutoPuppy/vit-fpga-wiki/blob/main/progress-2026-11-03.md"
+      }
+    ],
+    "createdAt": "2026-11-03T19:10:20.431Z",
+    "updatedAt": "2026-11-03T19:10:20.431Z",
+    "title": "2026-11-03 member-wn"
+  },
+  {
+    "id": "update-project-clock-20261103",
+    "memberId": "member-sy",
+    "date": "2026-11-03",
+    "title": "Integrated FPGA image switched to 80 MHz",
+    "scope": "project",
+    "category": "Issue",
+    "measurement": "80 MHz integrated FPGA clock",
+    "update": "Stephanie reported timing problems at 90 MHz and switched the integrated image to 80 MHz. The linked integration report records the final 80 MHz image passing all 88 reported timing summary checks.",
+    "context": "The report also identifies a stale exported SDC that previously constrained the core at 100 MHz. Keep the integrated image clock separate from the standalone softmax timing result near 90 MHz.",
+    "links": [
+      {
+        "label": "Integration report — timing and clock configuration",
+        "url": "https://github.com/PlutoPuppy/mnn-fpga/blob/main/docs/tinyvit-fpga-integration-report.md"
+      }
+    ]
+  },
+  {
+    "id": "update-project-neon-20261103",
+    "memberId": "member-wn",
+    "date": "2026-11-03",
+    "title": "CPU NEON throughput result",
+    "scope": "project",
+    "category": "Result",
+    "measurement": "692 million arithmetic operations per second",
+    "update": "Winnie reported this CPU NEON throughput measurement.",
+    "context": "Recorded from the team update on November 3. Benchmark workload, precision, thread count, operation-count convention and repeat-run statistics have not yet been supplied. This is arithmetic operations per second; it is not labeled as MAC/s or full-model inference throughput.",
+    "links": []
+  },
+  {
+    "id": "update-winnie-weekly-20261104",
+    "title": "Weekly update — SIMD, softmax and GELU",
+    "memberId": "member-wn",
+    "date": "2026-11-04",
+    "update": "- SIMD: On the Cortex-A9, 32×32 int8 matmul took 94.67 µs with NEON versus 202.12 µs in plain C (2.13× faster), with matching results. Used GCC -O3, 1,000 warmups and 10,000 timed runs.\n- Softmax: Implemented 16-bit fixed-point softmax for up to 196 values using 33-cycle unsigned restoring division. All 147 rows / 8,666 outputs matched Python exactly; standalone timing passed 90 MHz using 222 ALMs and 10 M10Ks. Next: matmul integration and full-system testing.\n- GELU: Bias + GELU is connected to accel_top’s CPU output-read path, processing 16 int8 lanes with a 256-byte bias buffer. Standalone timing passes 90 MHz; logic usage fell from 1,707 to 957 ALMs.",
+    "links": [],
+    "createdAt": "2026-11-04T22:00:34.676Z"
+  }
+]

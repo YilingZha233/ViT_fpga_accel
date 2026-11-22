@@ -1,0 +1,16 @@
+{
+  "architecture": "tiny_vit_21m_224",
+  "parameters": 21198568,
+  "checkpoint": "tiny_vit_21m_22kto1k_distill.pth",
+  "checkpoint_sha256": "eb20032633663fc3e1e49c1cb21332c11e6804c9f920b77da5f832dad248b897",
+  "models": {
+    "tinyvit-21m-fp32.mnn": {
+      "sha256": "003cd4958d8a725be2a117e58fb6513c6cb43c20cdf8616d112594c963c46661",
+      "bytes": 96343288
+    },
+    "tinyvit-21m-mlp-w8a8.mnn": {
+      "sha256": "35f43f6eacb28752b491d3e22353f86e37ff04b88ac07b73509dac52e0ca3ed3",
+      "bytes": 95459192
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "tool": "Quartus Prime Lite 18.1.0 Build 625",
+  "device": "5CSEMA5F31C6",
+  "seed": 1,
+  "target_period_ns": 11.111,
+  "boundary": "signed INT8 scores and signed INT8 probabilities 0..127, zero points zero",
+  "synthesis_passed": true,
+  "fit_passed": true,
+  "timing_passed": true,
+  "alms": 175,
+  "registers": 192,
+  "block_memory_bits": 8800,
+  "m10k_blocks": 3,
+  "dsp_blocks": 0,
+  "worst_setup_slack_ns": 3.894,
+  "worst_hold_slack_ns": 0.113,
+  "worst_pulse_width_slack_ns": 4.344,
+  "minimum_fmax_mhz": 138.56,
+  "all_unconstrained_counts_zero": true,
+  "board_tested": false,
+  "sha256": {
+    "rtl/softmax_row.sv": "37f08ab7d383db6b686f3a41ca6b8fc7e6250b0b1d0e6cfc9ebe82c09e29ecfb",
+    "example/exp_lut.hex": "fed1fbc2f3c0c34c91c9c0cb163181bfedb450766514511bc1f79ac7a16dfd95",
+    "quartus/softmax_benchmark.sv": "2c831884f2d114513c30fcc235f8256157b146e03bd88d16eeca2e0952b14aba",
+    "quartus/softmax.sdc": "66988592d10039c9ff99dcd644a1044baa356ee1bcd3bf07b06711da9e4fcd0e"
+  }
+}

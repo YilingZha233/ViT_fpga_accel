@@ -1,0 +1,199 @@
+// Simulation-only behavioral stand-ins for the buffer-RAM IP referenced by
+// rtl/accel_top.sv, rtl/input_buffer_32_bank.v, rtl/output_buffer_32_bank.v,
+// rtl/psum_buffer_32_bank.v and rtl/bias_buffer_32_bank.v (weight_buffer,
+// input_buffer, output_buffer, psum_buffer, bias_buffer - psum_buffer and
+// bias_buffer are the same-width RAMs, see their own notes at the bottom).
+//
+// The first three are MIXED-WIDTH simple dual-port RAMs: the Avalon-facing
+// port is AVS_DATA_WIDTH (128) wide so a host access moves a full word and
+// the byte address advances by 16, while the core-facing port stays
+// byte-wide because weight_loader/input_dispatch read one byte per cycle
+// and output_loader writes one int8 result per cycle.
+//
+//   weight_buffer : wide WRITE  (Avalon)      / narrow READ  (weight_loader)
+//   input_buffer  : wide WRITE  (Avalon)      / narrow READ  (input_dispatch)
+//   output_buffer : narrow WRITE (output_loader) / wide READ (Avalon)
+//
+// Byte ordering matches Altera's mixed-width altsyncram convention (and
+// Avalon byte lanes): narrow element i of a wide word sits at bit
+// [i*NARROW_WIDTH +: NARROW_WIDTH], so narrow address 16n+0 is the wide
+// word's least significant byte.
+//
+// These are NOT meant for synthesis. Swap this file out of the compile
+// fileset for the real generated IP (same module names/ports) once it
+// exists - the generated On-Chip Memory must be configured with matching
+// mixed port widths.
+`timescale 1ps/1ps
+
+// Wide write port, narrow read port.
+module mixed_ram_wr_wide #(
+    parameter NARROW_WIDTH = 8,
+    parameter WIDE_WIDTH   = 32,
+    parameter NARROW_DEPTH = 256
+)(
+    input                                       clock,
+    input      [WIDE_WIDTH-1:0]                 data,
+    input      [$clog2(NARROW_DEPTH)-1:0]       rdaddress,
+    input                                       rden,
+    input      [$clog2(NARROW_DEPTH*NARROW_WIDTH/WIDE_WIDTH)-1:0] wraddress,
+    input                                       wren,
+    output reg [NARROW_WIDTH-1:0]               q
+);
+    localparam RATIO = WIDE_WIDTH / NARROW_WIDTH;
+
+    reg [NARROW_WIDTH-1:0] mem [0:NARROW_DEPTH-1];
+
+    integer i;
+    always @(posedge clock) begin
+        if (wren)
+            for (i = 0; i < RATIO; i = i + 1)
+                mem[wraddress*RATIO + i] <= data[i*NARROW_WIDTH +: NARROW_WIDTH];
+        if (rden)
+            q <= mem[rdaddress];
+    end
+endmodule
+
+// Narrow write port, wide read port.
+module mixed_ram_rd_wide #(
+    parameter NARROW_WIDTH = 8,
+    parameter WIDE_WIDTH   = 32,
+    parameter NARROW_DEPTH = 128
+)(
+    input                                       clock,
+    input      [NARROW_WIDTH-1:0]               data,
+    input      [$clog2(NARROW_DEPTH*NARROW_WIDTH/WIDE_WIDTH)-1:0] rdaddress,
+    input                                       rden,
+    input      [$clog2(NARROW_DEPTH)-1:0]       wraddress,
+    input                                       wren,
+    output reg [WIDE_WIDTH-1:0]                 q
+);
+    localparam RATIO = WIDE_WIDTH / NARROW_WIDTH;
+
+    reg [NARROW_WIDTH-1:0] mem [0:NARROW_DEPTH-1];
+
+    integer i;
+    always @(posedge clock) begin
+        if (wren)
+            mem[wraddress] <= data;
+        if (rden)
+            for (i = 0; i < RATIO; i = i + 1)
+                q[i*NARROW_WIDTH +: NARROW_WIDTH] <= mem[rdaddress*RATIO + i];
+    end
+endmodule
+
+// weight_buffer: one bank of weight_buffer_32_bank (one per PE row), 1024
+// bytes. Avalon writes 128-bit words (64 x 128, 6-bit word address);
+// weight_loader reads bytes (1024 x 8, 10-bit).
+module weight_buffer (
+    input         clock,
+    input  [127:0] data,
+    input  [ 9:0] rdaddress,
+    input         rden,
+    input  [ 5:0] wraddress,
+    input         wren,
+    output [ 7:0] q
+);
+    mixed_ram_wr_wide #(
+        .NARROW_WIDTH (8),
+        .WIDE_WIDTH   (128),
+        .NARROW_DEPTH (1024)
+    ) u_ram (
+        .clock (clock), .data (data),
+        .rdaddress (rdaddress), .rden (rden),
+        .wraddress (wraddress), .wren (wren), .q (q)
+    );
+endmodule
+
+// input_buffer: one bank of input_buffer_32_bank, 1024 bytes. Avalon writes
+// 128-bit words (64 x 128, 6-bit word address); input_dispatch reads bytes
+// (1024 x 8, 10-bit).
+module input_buffer (
+    input         clock,
+    input  [127:0] data,
+    input  [ 9:0] rdaddress,
+    input         rden,
+    input  [ 5:0] wraddress,
+    input         wren,
+    output [ 7:0] q
+);
+    mixed_ram_wr_wide #(
+        .NARROW_WIDTH (8),
+        .WIDE_WIDTH   (128),
+        .NARROW_DEPTH (1024)
+    ) u_ram (
+        .clock (clock), .data (data),
+        .rdaddress (rdaddress), .rden (rden),
+        .wraddress (wraddress), .wren (wren), .q (q)
+    );
+endmodule
+
+// output_buffer: one bank of output_buffer_32_bank, 4096 bytes (16 rows of
+// the 256x256 int8 output canvas). output_loader writes one int8 result at
+// a time (4096 x 8, 12-bit); Avalon reads 128-bit words (256 x 128, 8-bit
+// word address).
+module output_buffer (
+    input         clock,
+    input  [ 7:0] data,
+    input  [ 7:0] rdaddress,
+    input         rden,
+    input  [11:0] wraddress,
+    input         wren,
+    output [127:0] q
+);
+    mixed_ram_rd_wide #(
+        .NARROW_WIDTH (8),
+        .WIDE_WIDTH   (128),
+        .NARROW_DEPTH (4096)
+    ) u_ram (
+        .clock (clock), .data (data),
+        .rdaddress (rdaddress), .rden (rden),
+        .wraddress (wraddress), .wren (wren), .q (q)
+    );
+endmodule
+
+// psum_buffer: one bank of psum_buffer_32_bank, 1024 32-bit raw running
+// sums (4 KB: 8 rows of a 128x128 tile), used only by output_loader.
+// Same-width: 1024 x 32 on both ports, 10-bit address on each side. Same
+// one-cycle registered read as the others.
+module psum_buffer (
+    input         clock,
+    input  [31:0] data,
+    input  [9:0]  rdaddress,
+    input         rden,
+    input  [9:0]  wraddress,
+    input         wren,
+    output reg [31:0] q
+);
+    reg [31:0] mem [0:1023];
+
+    always @(posedge clock) begin
+        if (wren)
+            mem[wraddress] <= data;
+        if (rden)
+            q <= mem[rdaddress];
+    end
+endmodule
+
+// bias_buffer: one bank of bias_buffer_32_bank, 16 int32 entries (the bias
+// of canvas rows r, r+16, ... for bank r). Unlike the other three this is
+// NOT mixed-width: bias_buffer_32_bank splits each 128-bit host word into
+// one 32-bit entry per bank itself, so both ports are 32 bits (16 x 32,
+// 4-bit address on each side). Same one-cycle registered read as the others.
+module bias_buffer (
+    input         clock,
+    input  [31:0] data,
+    input  [ 3:0] rdaddress,
+    input         rden,
+    input  [ 3:0] wraddress,
+    input         wren,
+    output reg [31:0] q
+);
+    reg [31:0] mem [0:15];
+
+    always @(posedge clock) begin
+        if (wren)
+            mem[wraddress] <= data;
+        if (rden)
+            q <= mem[rdaddress];
+    end
+endmodule
