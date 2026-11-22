@@ -32,7 +32,9 @@ The launcher verifies the selected file against `models/manifest.json`. It check
 
 ### Bring up the FPGA candidate
 
-Use the team's **90 MHz NI82** bitstream and matching bridge/boot configuration. The tested image is `matmul-soc-native-v4-90mhz.sof`, SHA256 `ff58e98c77d5471a02939c27d8cf1a044f25414a1c4190ee0fedef9d6019c5ad`. Obtain this external artifact from the hardware team, or build and qualify a new image. A normal reboot can restore the SD-card image. The driver uses a 16 MiB DMA/cache window at 0x30000000. The team's boot temporarily limited Linux to 768 MiB and enabled the bridges. Follow the [temporary boot procedure](mnn-fpga/docs/matmul-soc-integration.md) with the clock, image and reservation in the [NI82 qualification record](mnn-fpga/docs/tinyvit-native-resident-offload.md). Run one hardware client at a time.
+The [bundled FC1 capacity experiment image](hardware/bitstreams/fc1-capacity/matmul-soc-90mhz.sof) matches the November 12 build. The 21M hybrid runner requires the separate NI82 image identified below.
+
+Use the team's **90 MHz NI82** bitstream and matching bridge/boot configuration. The bundled image is [matmul-soc-native-v4-90mhz.sof](hardware/bitstreams/ni82/matmul-soc-native-v4-90mhz.sof), SHA256 `ff58e98c77d5471a02939c27d8cf1a044f25414a1c4190ee0fedef9d6019c5ad`. A normal reboot can restore the SD-card image. The driver uses a 16 MiB DMA/cache window at 0x30000000. The team's boot temporarily limited Linux to 768 MiB and enabled the bridges. Follow the [temporary boot procedure](mnn-fpga/docs/matmul-soc-integration.md) with the clock, image and reservation in the [NI82 qualification record](mnn-fpga/docs/tinyvit-native-resident-offload.md). Run one hardware client at a time.
 
 ```sh
 cd ~/tinyvit21-demo
