@@ -1,5 +1,9 @@
 # Verification record · 21 November 2026
 
+## Physical HPS accuracy comparison · 22 November 2026
+
+The operator ran `compare_accuracy.py` on the physical DE1-SoC using two HPS threads, FP32 MNN and identical bicubic-preprocessed inputs for both models. The reported terminal counts match the host verification on all four aggregate metrics. See the [board results and evaluation procedure](README.md#hps-accuracy-comparison-on-200-images).
+
 ## New TinyViT-21M artifacts
 
 | Check | Environment and input | Observed result |

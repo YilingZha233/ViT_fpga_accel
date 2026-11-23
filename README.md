@@ -79,6 +79,15 @@ Compute paired per-image differences and report median/p95 and sample count. Rep
 
 ## HPS accuracy comparison on 200 images
 
+The physical DE1-SoC HPS run produced the following results on 200 labeled images.
+
+| FP32 MNN model | Top-1 correct | Top-5 correct |
+|---|---:|---:|
+| TinyViT-5M | 158/200 (79.0%) | 195/200 (97.5%) |
+| TinyViT-21M | 167/200 (83.5%) | 199/200 (99.5%) |
+
+TinyViT-21M gained 4.5 percentage points in top-1 accuracy and 2.0 points in top-5 accuracy. These counts come from the board operator’s terminal output and match the earlier host CPU totals. The [evaluation manifest](demo/accuracy200/manifest.json) identifies the images and models.
+
 Run `python3 compare_accuracy.py ~/accuracy-200.csv` from the deployed demo folder. Use a new output filename. The two-thread CPU runner scores the original ImageNet 1,000 classes. It loads one FP32 MNN model at a time and checks for zero FPGA jobs. Both models receive RGB bicubic short-side resize to 256, a 224-pixel center crop and identical normalized tensors. The script prints top-1 and top-5 and writes paired rankings.
 
 The bundled original JPEGs are a deterministic sample (seed 496200) of 20 validation images per class from [Imagenette2-160](https://s3.amazonaws.com/fast-ai-imageclas/imagenette2-160.tgz). Report results as balanced Imagenette subset accuracy. The manifest identifies each archive member, ImageNet label and SHA-256. The 5M FP32 export uses the [official distilled 224 checkpoint](https://github.com/wkcn/TinyViT-model-zoo/releases/download/checkpoints/tiny_vit_5m_22kto1k_distill.pth), static ONNX opset 17 and MNN 3.6.2. The existing 21M FP32 model is used unchanged.
