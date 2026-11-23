@@ -1,5 +1,7 @@
 # TinyViT-21M · DE1-SoC camera demo
 
+See the [physical board measurements](evidence/21m/board-measurements.md) for matched inference timings, live camera results and HPS accuracy.
+
 The active demo runs **TinyViT-21M, 224 × 224, 1,000 classes, using MNN**. Both supplied models come from the same 21,198,568-parameter PyTorch checkpoint as the team's earlier 21M evaluation. The default is a persistent, two-thread FP32 CPU session. The hybrid candidate moves one MLP block to the team's NI82 design. The earlier 30-layer board result belongs to a smaller model. See [analysis and measurements](ANALYSIS.md), [verification status](VALIDATION.md) and [sources](SOURCES.md).
 
 ## Run on HPS Linux
@@ -47,7 +49,7 @@ sudo python3 hps_local_demo.py --mode hybrid --device /dev/video0 --timings hybr
 python3 summarize_hps_local.py hybrid-live.csv
 ```
 
-The smoke executable includes an integer reference check for the 21M workload, 784 × 192 → 768 → 192. The model and CPU demo assets are included. The physical HPS camera and physical 21M FPGA run remain to be measured.
+The smoke executable includes an integer reference check for the 21M workload, 784 × 192 → 768 → 192. The model and CPU demo assets are included. The [physical board measurements](evidence/21m/board-measurements.md) include live camera predictions and the four-mode benchmark.
 
 ### What the audience sees
 

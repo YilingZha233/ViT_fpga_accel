@@ -20,8 +20,10 @@ The operator ran `compare_accuracy.py` on the physical DE1-SoC using two HPS thr
 
 The production binary uses the physical device path for hybrid mode. The test double and the NI82 software-model binary are excluded from the deployment kit. The raw emulator log includes timings for debugging; do not report its timings or memory numbers as DE1-SoC measurements.
 
-## Physical acceptance still required
+## Original board acceptance procedure
+
+See the [physical board measurements](evidence/21m/board-measurements.md) for the subsequent physical runs.
 
 1. On the actual HPS image, verify the supplied preprocessing fixtures and run the 21M FP32 and mixed CPU snapshots. Compare the saved logits for the same input and record dual-core settings, MNN build, hashes and clock.
 2. Load the qualified NI82 image using the team's bridge and memory-reservation procedure. Run the new 21M shape smoke check, then exercise unfused and resident inference. Verify per-frame 207/2/0 and 207/2/1 hardware counters and compare full logits and labeled predictions. The stock SD image can replace the temporary FPGA image after reboot.
-3. Run saved-frame paired comparisons and then live HPS-only and hybrid camera tests. Report model and application latency distributions, completed frames/s and separate memory measurements. A physical end-to-end result for this 21M demo has not yet been recorded.
+3. Run saved-frame paired comparisons and then live HPS-only and hybrid camera tests. Report model and application latency distributions, completed frames/s and separate memory measurements.

@@ -1,6 +1,6 @@
 # TinyViT capstone integration review · 21 November 2026
 
-**The demo is TinyViT-21M on MNN.** The team has physical DE1-SoC results for the 21M CPU model on an earlier runtime and separate physical MNN/NI82 results for a smaller graph. This integration ports the original 21M checkpoint to MNN and connects a selected 21M MLP to the existing driver. A matched 21M MNN board benchmark is still needed for the capstone's speedup claim.
+The [physical board measurements](evidence/21m/board-measurements.md) supersede the original pre-deployment status below. **The demo is TinyViT-21M on MNN.** The team has physical DE1-SoC results for the 21M CPU model on an earlier runtime and separate physical MNN/NI82 results for a smaller graph. This integration ports the original 21M checkpoint to MNN and connects a selected 21M MLP to the existing driver.
 
 ## Which TinyViT?
 
@@ -74,6 +74,6 @@ The NI82 driver contract limits one complete reduction to K ≤ 1024. Later 21M 
 
 ## What can go on the demo poster
 
-Today: **“We ported the team's original TinyViT-21M checkpoint to MNN, built a persistent HPS camera pipeline, and integrated two 21M MLP projections with the NI82 driver. CPU-only conversion and quantization results are reported on a fixed labeled set.”** For physical 21M performance, record the measured inference, per-frame receive-to-result latency, completion-event throughput, per-process memory and paired predictions using the [runbook](README.md). The 6.82% and 12.89% speedups belong to the earlier board experiment. Physical 21M speedup, live FPS and camera-to-display latency remain open measurements.
+The [physical board measurements](evidence/21m/board-measurements.md) document the deployed 21M results. Completed-frame throughput and camera-to-display latency still need separate measurements.
 
 The full 21M software path was also exercised in emulated ARM Linux. Both unfused and resident modes ran through the real MNN callbacks with a separate NI82 software-device build. Each submitted 207 jobs per image. The resident case skipped four intermediate operations and retained one MLP intermediate; the two distinct inputs matched PyTorch's top-1. [21M validation record](VALIDATION.md)
