@@ -59,7 +59,7 @@ def verify_fixtures(folder):
         ok = bool(np.isfinite(actual).all() and error <= 1e-5)
         print('{} max_abs_error={:.9g} {}'.format(case['image'], error, 'PASS' if ok else 'FAIL'))
         passed = passed and ok
-    print('Pillow {}; NumPy {}'.format(PIL.__version__, np.__version__))
+    print('Pillow {}; NumPy {}'.format(getattr(PIL, '__version__', 'unknown'), np.__version__))
     return passed
 
 
@@ -473,7 +473,7 @@ def main():
     demo=Demo(a)
     server=Server((a.bind,a.port),handler_for(demo)) if a.preview else None
     if server: print('HPS local demo: browser http://BOARD_IP:{}/ ; Ctrl+C to stop'.format(a.port),flush=True)
-    print('Pillow {}; NumPy {}'.format(PIL.__version__,np.__version__),flush=True)
+    print('Pillow {}; NumPy {}'.format(getattr(PIL, '__version__', 'unknown'),np.__version__),flush=True)
     demo.start()
     try:
         if server:
