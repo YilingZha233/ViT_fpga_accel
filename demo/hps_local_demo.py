@@ -132,6 +132,12 @@ class Backend:
         self.timeout = args.timeout
         self.hybrid = args.mode in ('hybrid','hybrid-unfused')
         self.fused = args.mode == 'hybrid'
+        self.expected_counts = (0, 0, 0)
+        if self.hybrid:
+            if getattr(args, 'candidate', '21m') == '5m':
+                self.expected_counts = (437, 30, 4) if self.fused else (434, 30, 0)
+            else:
+                self.expected_counts = (207, 2, int(self.fused))
         env = {k:v for k,v in os.environ.items()
                if not k.startswith(('MNN_MATMUL_SOC_', 'MNN_FPGA_', 'MNN_INT8_TRACE'))}
         cmd = [args.runner, '--camera-stream', '--model', args.model, '--width', '224',
@@ -166,7 +172,7 @@ class Backend:
         meta = self.message(deadline)
         native = meta.get('native', {})
         counts = (meta['jobs'], meta['layers'], native.get('fused_pairs', 0))
-        if meta['id'] != frame_id or counts != ((207,2,int(self.fused)) if self.hybrid else (0,0,0)):
+        if meta['id'] != frame_id or counts != self.expected_counts:
             raise RuntimeError('Frame ID or measured NI82 counters differ from the selected mode')
         if self.hybrid and (native['pending'] != -1 or (self.fused and not native['skipped_runtime_operations'])):
             raise RuntimeError('Incomplete resident MLP execution')
@@ -214,7 +220,7 @@ PAGE = b'''<!doctype html><html><head><meta charset="utf-8"><title>HPS TinyViT</
 let shown=-1, lastFrame=-1;
 async function poll(){try{const r=await fetch('/status',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();
 if(s.frame_id!==lastFrame){document.getElementById('live').src='/preview.jpg?v='+s.frame_id;lastFrame=s.frame_id;}
-let text=(s.result?s.result.mode+' | ':'')+s.status+' | completed: '+s.completed+' | preview received age: '+(s.preview_age_s===null?'n/a':s.preview_age_s.toFixed(1)+' s');
+let text=(s.result?s.result.candidate+' '+s.result.mode+' | ':'')+s.status+' | completed: '+s.completed+' | preview received age: '+(s.preview_age_s===null?'n/a':s.preview_age_s.toFixed(1)+' s');
 if(s.result){let q=s.result;if(q.frame_id!==shown){document.getElementById('crop').src='data:image/jpeg;base64,'+q.crop_b64;document.getElementById('labels').textContent=q.top5.map(x=>x.label+': '+(100*x.score).toFixed(1)+'%').join('\\n');shown=q.frame_id;}
 text+='\\nResult frame '+q.frame_id+' | frame age '+s.result_age_s.toFixed(1)+' s';text+='\\nHPS JPEG decode '+q.decode_ms.toFixed(1)+' ms | preprocessing '+q.preprocess_ms.toFixed(1)+' ms';text+='\\nModel inference '+q.infer_ms.toFixed(0)+' ms | request '+(q.request_ms/1000).toFixed(2)+' s';}
 if(s.error)text+='\\nSTOPPED / STALE: '+s.error;document.getElementById('status').textContent=text;
@@ -222,7 +228,7 @@ if(s.error)text+='\\nSTOPPED / STALE: '+s.error;document.getElementById('status'
 </script></body></html>'''
 
 
-FIELDS = ['transform','mode','model_sha256','threads','fpga_jobs','linear_ops','resident_pairs','runner_peak_kib','app_peak_kib','offload_profile_json','frame_id','first_request','decode_ms','preprocess_ms','pack_ms','infer_ms',
+FIELDS = ['candidate','transform','mode','model_sha256','threads','fpga_jobs','linear_ops','resident_pairs','runner_peak_kib','app_peak_kib','offload_profile_json','frame_id','first_request','decode_ms','preprocess_ms','pack_ms','infer_ms',
           'service_ms','ipc_overhead_ms','request_ms','received_to_result_ms',
           'publish_ms','completed_since_start_s','load_ms','top1']
 
@@ -320,7 +326,7 @@ class Demo:
                     crop_jpeg = io.BytesIO()
                     crop.save(crop_jpeg,format='JPEG',quality=90)
                     crop_bytes = crop_jpeg.getvalue()
-                m = dict(transform=self.args.transform,mode=self.args.mode,model_sha256=self.args.model_hash,threads=self.args.threads,
+                m = dict(candidate=self.args.candidate,transform=self.args.transform,mode=self.args.mode,model_sha256=self.args.model_hash,threads=self.args.threads,
                          fpga_jobs=meta['jobs'],linear_ops=meta['layers'],
                          resident_pairs=meta.get('native',{}).get('fused_pairs',0),
                          runner_peak_kib=meta['runner_peak_kib'],
@@ -335,7 +341,7 @@ class Demo:
                 m['publish_ms'] = (time.monotonic()-returned)*1000
                 m['completed_since_start_s'] = time.monotonic()-self.started
                 result = dict(m,top5=top5,crop_b64=base64.b64encode(crop_bytes).decode('ascii'),
-                              backend=self.args.mode)
+                              backend=self.args.candidate + ' ' + self.args.mode)
                 if self.args.snapshot_out:
                     out = Path(self.args.snapshot_out)
                     (out/'input.bin').write_bytes(raw)
@@ -348,8 +354,8 @@ class Demo:
                     self.completed += 1
                     self.result, self.result_received = result, received
                     self.status = 'READY'
-                print('{} frame={} jobs={} layers={} pairs={} class={} inference_ms={:.1f} preprocess_ms={:.1f} request_ms={:.1f}'.format(
-                    self.args.mode,frame_id,m['fpga_jobs'],m['linear_ops'],m['resident_pairs'],self.labels[int(indices[0])],infer,m['preprocess_ms'],m['request_ms']),flush=True)
+                print('{} {} frame={} jobs={} layers={} pairs={} class={} inference_ms={:.1f} preprocess_ms={:.1f} request_ms={:.1f}'.format(
+                    self.args.candidate,self.args.mode,frame_id,m['fpga_jobs'],m['linear_ops'],m['resident_pairs'],self.labels[int(indices[0])],infer,m['preprocess_ms'],m['request_ms']),flush=True)
                 if self.args.image or (self.args.max_frames and self.completed >= self.args.max_frames):
                     with self.lock:
                         self.status = 'COMPLETE'
@@ -419,12 +425,19 @@ class Server(ThreadingMixIn,HTTPServer):
 
 
 def verify_model(a,folder):
-    if a.mode=='cpu-fp32':
+    candidate = getattr(a, 'candidate', '21m')
+    manifest_name = 'manifest.json'
+    if candidate == '5m':
+        filename = 'tinyvit-5m-fp32.mnn' if a.mode == 'cpu-fp32' else 'tinyvit-5m-mixed.mnn'
+        manifest_name = 'manifest-5m.json'
+    elif a.mode=='cpu-fp32':
         filename = 'tinyvit-21m-fp32.mnn'
     else:
         filename = 'tinyvit-21m-mlp-w8a8.mnn'
-    manifest = json.loads((folder/'models'/'manifest.json').read_text())
-    expected = manifest['models'][filename]['sha256']
+    manifest = json.loads((folder/'models'/manifest_name).read_text())
+    expected = {manifest['models'][filename]['sha256']}
+    if candidate == '5m' and a.mode != 'cpu-fp32' and a.model:
+        expected.add(manifest['teammate_mixed_sha256'])
     if not a.model:
         a.model = str(folder/'models'/filename)
     digest = hashlib.sha256()
@@ -435,7 +448,7 @@ def verify_model(a,folder):
     except OSError as exc:
         raise ValueError(str(exc))
     a.model_hash = digest.hexdigest()
-    if a.model_hash != expected:
+    if a.model_hash not in expected:
         raise ValueError('Model SHA256 differs from the recorded ' + a.mode + ' checkpoint: '+a.model_hash)
 
 
@@ -444,6 +457,7 @@ def main():
     p.add_argument('--verify-fixtures')
     folder = Path(__file__).resolve().parent
     p.add_argument('--runner',default=str(folder/'bin'/'tinyvit_stream'))
+    p.add_argument('--candidate', choices=['21m','5m'], default='21m')
     p.add_argument('--model')
     p.add_argument('--transform',choices=['mnn-224','camera-crop'],default='camera-crop')
     p.add_argument('--mode', choices=['cpu-fp32','cpu-mixed','hybrid-unfused','hybrid'],default='cpu-fp32')

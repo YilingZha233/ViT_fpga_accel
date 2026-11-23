@@ -1,0 +1,14 @@
+{
+  "architecture": "tiny_vit_5m_224",
+  "models": {
+    "tinyvit-5m-mixed.mnn": {
+      "sha256": "ca5acf77bcebf821c166df6788e08cbf731e5782b78047e883297a26852bcf4f",
+      "bytes": 18677828
+    },
+    "tinyvit-5m-fp32.mnn": {
+      "sha256": "52cfd598a2066ad8af41ea49cd82b8da5b7d5b85eb5b8d83a9dd03b1203dafa1",
+      "bytes": 26528020
+    }
+  },
+  "teammate_mixed_sha256": "f6a577a805887e486a4bc52179724e9c7c3340ec694c51532073b55beabab1cf"
+}

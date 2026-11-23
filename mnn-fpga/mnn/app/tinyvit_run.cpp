@@ -286,10 +286,10 @@ int main(int argc,char** argv) {
         };
         if(o.camera) {
             const auto& outputs = net->getSessionOutputAll(session);
-            if(outputs.size()!=1 || (o.native_int8 && native_count!=2))
+            if(outputs.size()!=1 || (o.native_int8 && native_count==0))
                 throw std::runtime_error("Camera model output or native plan mismatch");
             serve_camera(pipe.get(), *input, host, *outputs.begin()->second, run,
-                         elapsed(process_start), o.native_int8, o.profile);
+                         elapsed(process_start), o.native_int8 ? native_count : 0, o.profile);
             return 0;
         }
         // This graph may reuse the input allocation for intermediate values.

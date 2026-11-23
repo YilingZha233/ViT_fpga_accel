@@ -1,8 +1,8 @@
-# TinyViT-21M · DE1-SoC camera demo
+# TinyViT-21M and TinyViT-5M · DE1-SoC camera demo
 
 See the [physical board measurements](evidence/21m/board-measurements.md) for matched inference timings, live camera results and HPS accuracy.
 
-The active demo runs **TinyViT-21M, 224 × 224, 1,000 classes, using MNN**. Both supplied models come from the same 21,198,568-parameter PyTorch checkpoint as the team's earlier 21M evaluation. The default is a persistent, two-thread FP32 CPU session. The hybrid candidate moves one MLP block to the team's NI82 design. The earlier 30-layer board result belongs to a smaller model. See [analysis and measurements](ANALYSIS.md), [verification status](VALIDATION.md) and [sources](SOURCES.md).
+The default candidate runs **TinyViT-21M, 224 × 224, 1,000 classes, using MNN**. Both supplied models come from the same 21,198,568-parameter PyTorch checkpoint as the team's earlier 21M evaluation. The default is a persistent, two-thread FP32 CPU session. The hybrid candidate moves one MLP block to the team's NI82 design. The earlier 30-layer board result belongs to a smaller model. See [analysis and measurements](ANALYSIS.md), [verification status](VALIDATION.md) and [sources](SOURCES.md).
 
 ## Run on HPS Linux
 
@@ -50,6 +50,22 @@ python3 summarize_hps_local.py hybrid-live.csv
 ```
 
 The smoke executable includes an integer reference check for the 21M workload, 784 × 192 → 768 → 192. The model and CPU demo assets are included. The [physical board measurements](evidence/21m/board-measurements.md) include live camera predictions and the four-mode benchmark.
+
+### TinyViT-5M interim camera demo
+
+Deploy the updated `demo/` directory together, including the new runner and mixed model. Both candidates use the same UVC capture, camera crop, persistent MNN session, ImageNet labels and optional browser preview. From the deployed directory, check a saved frame first. For hybrid execution, bring up the 90 MHz NI82 image and run the smoke check above.
+
+```sh
+python3 hps_local_demo.py --candidate 5m --mode cpu-mixed --image fixtures/jpeg_landscape.jpg --snapshot-out five-cpu
+sudo python3 hps_local_demo.py --candidate 5m --mode hybrid --image fixtures/jpeg_landscape.jpg --snapshot-out five-fpga
+sudo python3 hps_local_demo.py --candidate 5m --mode hybrid --device /dev/video0 --max-frames 20 --timings five-live.csv --preview
+```
+
+The terminal and CSV identify the candidate. Each accepted 5M hybrid frame requires **437 FPGA jobs, 30 linear operations and 4 resident MLP pairs**. Use `--mode hybrid-unfused` for the 434-job, 30-linear, zero-pair path. Use `--mode cpu-mixed` to compare identical weights and preprocessing on the HPS, or `--mode cpu-fp32` for the original FP32 baseline. Both CPU modes require zero hardware counters.
+
+The bundled 5M mixed export starts with this checkout’s official distilled FP32 model. It applies [the team’s 37-layer W8A8 policy](mnn-fpga/mnn/app/tinyvit_w8a8_accuracy_allowlist.txt) using MNN 3.6.2 and 128 Imagenette training crops. To reproduce it, run `scripts/prepare_21m_data.py` on Imagenette2-160, compile `mnn-fpga/mnn/app/create_mixed_quantized_model.cpp` with the same include paths as `scripts/rebuild_models.sh`, then run `mnn-fpga/mnn/app/quantize_tinyvit_w8a8.py` with `--model demo/models/tinyvit-5m-fp32.mnn --calibration-dir DATA/train --mixed-builder PATH_TO_BUILDER --output NEW_MODEL.mnn`.
+
+Host MNN scored the bundled mixed model at 158/200 top-1 and 195/200 top-5 on the existing Imagenette validation sample. Its top prediction matched FP32 on 198/200 inputs. The ARM runner’s offline plan found 30 linears and four pairs. Physical camera throughput, FPGA counters and hybrid logits for this export still need a DE1-SoC run. Compare the two saved snapshots on the board before timing live frames. For the exact mixed graph from the teammate’s board measurements, add `--model /home/ubuntu/tinyvit/tiny-vit-mixed-w8a8-accuracy.mnn` in mixed or hybrid mode. The launcher checks its published hash. [Upstream NI82 qualification](mnn-fpga/docs/tinyvit-native-resident-offload.md)
 
 ### What the audience sees
 

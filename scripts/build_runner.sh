@@ -33,7 +33,7 @@ cmake -S "$checkout" -B "$base/lib" -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$base/lib" --target MNN -j "${JOBS:-4}"
 cmake -S "$repo/mnn/app" -B "$base/app" -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="$tc" -DZIG_EXE="$ZIG_EXE" -DMNN_SOURCE="$checkout" \
-    -DMNN_BUILD="$base/lib" -DTINYVIT_STATIC=ON
+    -DMNN_BUILD="$base/lib" -DTINYVIT_STATIC=ON -DCMAKE_EXE_LINKER_FLAGS="-static -s"
 cmake --build "$base/app" --target tinyvit_run -j "${JOBS:-4}"
 cp "$base/app/tinyvit_run" "$project/demo/bin/tinyvit_stream.new"
 chmod 755 "$project/demo/bin/tinyvit_stream.new"

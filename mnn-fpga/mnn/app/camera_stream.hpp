@@ -24,7 +24,7 @@ inline void camera_message(FILE* pipe, const std::string& message, const float* 
 
 template <class Run>
 void serve_camera(FILE* pipe, MNN::Tensor& input, MNN::Tensor& host, MNN::Tensor& output,
-                  Run run, double load_ms, bool resident, bool profile) {
+                  Run run, double load_ms, unsigned native_layers, bool profile) {
     using Clock = std::chrono::steady_clock;
     const auto ms = [](Clock::time_point t) {
         return std::chrono::duration<double,std::milli>(Clock::now() - t).count();
@@ -53,7 +53,7 @@ void serve_camera(FILE* pipe, MNN::Tensor& input, MNN::Tensor& host, MNN::Tensor
         const double infer_ms = ms(infer_start);
         auto jobs = mnn_fpga_completed_jobs() - jobs_before;
         auto ops = mnn_fpga_completed_int8_operations() - ops_before;
-        if (jobs != (resident ? 207u : 0u) || ops != (resident ? 2u : 0u))
+        if (ops != native_layers || (jobs > 0) != (native_layers > 0))
             throw std::runtime_error("Unexpected per-frame FPGA job or layer count");
         if (!output.copyToHostTensor(&scores)) throw std::runtime_error("Camera output copy failed");
         const double service = ms(start);
@@ -63,7 +63,7 @@ void serve_camera(FILE* pipe, MNN::Tensor& input, MNN::Tensor& host, MNN::Tensor
         meta << "{\"id\":" << id << ",\"pack_ms\":" << pack_ms << ",\"infer_ms\":" << infer_ms
              << ",\"service_ms\":" << service << ",\"jobs\":" << jobs << ",\"layers\":" << ops
              << ",\"runner_peak_kib\":" << resources.ru_maxrss;
-        if (resident) meta << ",\"native\":" << mnn_fpga_native_json();
+        if (native_layers) meta << ",\"native\":" << mnn_fpga_native_json();
         if (profile) meta << ",\"offload\":" << mnn_fpga_profile_json();
         meta << "}";
         camera_message(pipe, meta.str(), scores.host<float>());
