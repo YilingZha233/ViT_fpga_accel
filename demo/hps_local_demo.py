@@ -228,7 +228,7 @@ let shown=-1;
 async function poll(){try{const r=await fetch('/status',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();
 let text=(s.result?s.result.candidate+' '+s.result.mode+' | ':'')+s.status+' | completed: '+s.completed+' | preview received age: '+(s.preview_age_s===null?'n/a':s.preview_age_s.toFixed(1)+' s');
 if(s.result){let q=s.result;if(q.frame_id!==shown){let crop=new Image();crop.onload=()=>{let target=document.getElementById('crop');target.src=crop.src;};crop.src='/crop.jpg?v='+q.frame_id;document.getElementById('labels').textContent=q.top5.map(x=>x.label+': '+(100*x.score).toFixed(1)+'%').join('\\n');shown=q.frame_id;}
-text+='\\nResult frame '+q.frame_id+' | frame age '+s.result_age_s.toFixed(1)+' s';text+='\\nHPS JPEG decode '+q.decode_ms.toFixed(1)+' ms | preprocessing '+q.preprocess_ms.toFixed(1)+' ms';text+='\\nModel inference '+q.infer_ms.toFixed(0)+' ms | request '+(q.request_ms/1000).toFixed(2)+' s';}
+text+='\\nResult frame '+q.frame_id+' | frame age '+s.result_age_s.toFixed(1)+' s';text+='\\nHPS JPEG decode '+q.decode_ms.toFixed(1)+' ms | preprocessing '+q.preprocess_ms.toFixed(1)+' ms';text+='\\nMNN inference '+q.infer_ms.toFixed(1)+' ms | JPEG-to-logits '+q.received_to_result_ms.toFixed(1)+' ms';text+='\\nOutside MNN forward '+(q.received_to_result_ms-q.infer_ms).toFixed(1)+' ms | request '+(q.request_ms/1000).toFixed(2)+' s';}
 if(s.error)text+='\\nSTOPPED / STALE: '+s.error;document.getElementById('status').textContent=text;
 }catch(e){document.getElementById('status').textContent='DISCONNECTED / STALE: '+e.message;}setTimeout(poll,500);}poll();
 </script></body></html>'''
