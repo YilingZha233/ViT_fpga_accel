@@ -35,6 +35,8 @@ The clips illustrate live predictions and hardware counters. The latency means a
 - [FP32 CPU demo](videos/cpu-fp32.mp4)
 - [Mixed CPU baseline demo](videos/cpu-mixed.mp4)
 - [DMC1 FPGA offload demo with the initial 1.51× MNN result](videos/fpga-dmc1-1.51x.mp4)
+- [CPU FP32 v2 recording](videos/cpu-fp32-v2.mp4)
+- [DMC1 FPGA offload v2 recording](videos/fpga-dmc1-1.5x-v2.mp4)
 
 ## Run the live demos
 

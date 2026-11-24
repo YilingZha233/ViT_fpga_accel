@@ -110,6 +110,44 @@ Against original FP32 CPU, DMC1 reduced mean end-to-end camera latency by **30.1
 
 By default the board prints the frame number, predicted ImageNet class, inference time, preprocessing time and hardware counters. Add `--preview` to the live command to publish a read-only view at `http://BOARD_IP:8080`. The crop and prediction in the result have the same frame ID; the independent live preview may be newer. Capture, JPEG decode, resize, crop, normalization, inference dispatch and label selection all run on the board. Closing the browser leaves classification running. Use a persistent board shell such as tmux if the SSH client will disconnect.
 
+The v2 recordings are available here: [CPU FP32 v2](evidence/5m/videos/cpu-fp32-v2.mp4) and [DMC1 FPGA offload v2](evidence/5m/videos/fpga-dmc1-1.5x-v2.mp4).
+
+### Run a mode with the browser preview
+
+Run the selected command in PuTTY from `~/tinyvit5m-camera`. Prediction output remains in PuTTY; open `http://BOARD_IP:8080` in a browser, replacing `BOARD_IP` with the board's Ethernet or Wi-Fi address. For the direct PC Ethernet connection used here, the board address is `192.168.137.2`.
+
+#### Original FP32 CPU
+
+```sh
+python3 hps_local_demo.py --candidate 5m --mode cpu-fp32 \
+  --model models/tiny-vit.mnn \
+  --runner "$PWD/bin/tinyvit_stream_codesign" \
+  --device /dev/video0 --preview
+```
+
+#### Mixed CPU
+
+```sh
+python3 hps_local_demo.py --candidate 5m --mode cpu-mixed \
+  --model models/tiny-vit-mixed-w8a8-accuracy.mnn \
+  --runner "$PWD/bin/tinyvit_stream_codesign" \
+  --device /dev/video0 --preview
+```
+
+#### DMC1 FPGA offload
+
+Load the 90 MHz DMC1 image first. The FPGA mode requires `sudo` for hardware access.
+
+```sh
+sudo python3 hps_local_demo.py --candidate 5m --mode hybrid-codesign \
+  --model models/tiny-vit-mixed-w8a8-accuracy.mnn \
+  --projection-ranges models/projection-nine.tsv \
+  --runner "$PWD/bin/tinyvit_stream_codesign" \
+  --device /dev/video0 --preview
+```
+
+If the board is directly connected to the Windows PC and its address is missing after a reboot, restore the temporary address with `sudo ip addr replace 192.168.137.2/24 dev eth0` before opening the preview. On a router network, use the address assigned by that network instead.
+
 The default transform is the 21M baseline transform: RGB, bicubic resize of the shorter edge to 256, 224×224 center crop, divide by 255, ImageNet mean/std, FP32 NCHW. The alternate `--transform mnn-224` reproduces the direct bilinear resize used by the **older** MNN experiment. Use the same transform for both sides of a performance or accuracy comparison.
 
 ### Measure the 21M baseline and hybrid gain
