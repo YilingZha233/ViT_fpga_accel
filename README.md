@@ -96,7 +96,15 @@ sudo python3 hps_local_demo.py --candidate 5m --mode hybrid-codesign \
 
 Use `--mode cpu-mixed --model models/tiny-vit-mixed-w8a8-accuracy.mnn` for the same-model CPU comparison. For the upstream FP32 baseline, use `--mode cpu-fp32 --model models/tiny-vit.mnn` with the original checkpoint. Omit `--projection-ranges` in either CPU mode. The camera CSV records both forward time (`infer_ms`) and JPEG receipt to logits (`received_to_result_ms`).
 
-On the DE1-SoC with the verified upstream DMC1 bitstream, the co-design stream averaged 845.7 ms per forward and 1,022.5 ms from JPEG receipt to logits. The corresponding means were 1,279.8 ms and 1,442.9 ms for original FP32 CPU, and 1,179.5 ms and 1,344.1 ms for mixed CPU. Each mode used the same ARM stream binary and two HPS threads. The comparison used 10 live frames per mode after discarding the first frame. The captures were sequential live feeds. All measured FPGA frames reported 400 jobs, 39 offloaded operations and four resident pairs. Raw CSVs are on the board in `~/tinyvit5m-camera/dmc1-latency-PxsvmJ/`.
+A repeated three-mode live camera comparison on the DE1-SoC measured the following mean latencies (20 samples per mode after dropping the first frame of each run):
+
+| TinyViT-5M mode | JPEG receipt to logits | MNN inference | FPGA jobs / offloaded operations / resident pairs per frame |
+|---|---:|---:|---:|
+| Original FP32 CPU | 1,435.7 ms | 1,264.9 ms | 0 / 0 / 0 |
+| Mixed CPU | 1,367.2 ms | 1,190.7 ms | 0 / 0 / 0 |
+| DMC1 FPGA co-design | **1,003.8 ms** | **832.0 ms** | 400 / 39 / 4 |
+
+Against original FP32 CPU, DMC1 reduced mean end-to-end camera latency by **30.1% (1.43 times faster)** and mean MNN inference latency by **34.2% (1.52 times faster)**. The upstream saved-input forward benchmark separately measured 1,207.1 ms for FP32 and 757.0 ms for DMC1 (1.595 times); that is model-only timing, not live camera latency. The live comparison used the same ARM runner and two HPS threads at 640x480 MJPEG/30 fps, with sequential captures from the same live feed. See the [full measurement report](evidence/5m/board-measurements.md) for methodology, earlier runs, raw CSV locations, recorded demos and run commands. The earlier 10-frame comparison measured 845.7 ms DMC1 inference and 1,022.5 ms camera latency; its raw CSVs are on the board in `~/tinyvit5m-camera/dmc1-latency-PxsvmJ/`.
 
 ### What the audience sees
 
