@@ -10,5 +10,7 @@
       "bytes": 26528020
     }
   },
-  "teammate_mixed_sha256": "f6a577a805887e486a4bc52179724e9c7c3340ec694c51532073b55beabab1cf"
+  "teammate_mixed_sha256": "f6a577a805887e486a4bc52179724e9c7c3340ec694c51532073b55beabab1cf",
+  "teammate_fp32_sha256": "f7aee628e2cef2d726979cc259529b3af0778b429c52ba8b76f3c609a2996de4",
+  "projection_ranges_sha256": "43b2b4e2268b7b91ec4387234774ea35a6b8dfac83a44a1177bee55ca578b3bc"
 }

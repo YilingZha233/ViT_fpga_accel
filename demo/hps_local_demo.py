@@ -130,11 +130,14 @@ class Process:
 class Backend:
     def __init__(self, args):
         self.timeout = args.timeout
-        self.hybrid = args.mode in ('hybrid','hybrid-unfused')
-        self.fused = args.mode == 'hybrid'
+        codesign = args.mode == 'hybrid-codesign'
+        self.hybrid = args.mode in ('hybrid','hybrid-unfused','hybrid-codesign')
+        self.fused = args.mode in ('hybrid','hybrid-codesign')
         self.expected_counts = (0, 0, 0)
         if self.hybrid:
-            if getattr(args, 'candidate', '21m') == '5m':
+            if codesign:
+                self.expected_counts = (400, 39, 4)
+            elif getattr(args, 'candidate', '21m') == '5m':
                 self.expected_counts = (437, 30, 4) if self.fused else (434, 30, 0)
             else:
                 self.expected_counts = (207, 2, int(self.fused))
@@ -146,6 +149,10 @@ class Backend:
             env.update(MNN_MATMUL_SOC_DEVMEM='1', MNN_MATMUL_SOC_DMA='1')
             cmd.extend(['--fpga-native-int8','--require-fpga'])
             if self.fused: cmd.append('--fpga-native-pairs')
+        if codesign:
+            cmd.extend(['--native-projections', args.projection_ranges, '--fused-attention', '--gelu-neon'])
+            for setting in ('REUSE_A', 'LIVE_ROWS', 'DMA_POLL_BATCH', 'DMA_CHAIN', 'PIPELINE_C', 'FAST_POLL'):
+                env['MNN_MATMUL_SOC_' + setting] = '1'
         if args.profile:
             cmd.append('--profile')
         self.process = Process(cmd, env)
@@ -344,6 +351,8 @@ class Demo:
                               backend=self.args.candidate + ' ' + self.args.mode)
                 if self.args.snapshot_out:
                     out = Path(self.args.snapshot_out)
+                    if not self.args.image:
+                        (out/'source.jpg').write_bytes(jpeg)
                     (out/'input.bin').write_bytes(raw)
                     (out/'logits.bin').write_bytes(y.astype('<f4').tobytes())
                     (out/'crop.jpg').write_bytes(crop_bytes)
@@ -356,7 +365,7 @@ class Demo:
                     self.status = 'READY'
                 print('{} {} frame={} jobs={} layers={} pairs={} class={} inference_ms={:.1f} preprocess_ms={:.1f} request_ms={:.1f}'.format(
                     self.args.candidate,self.args.mode,frame_id,m['fpga_jobs'],m['linear_ops'],m['resident_pairs'],self.labels[int(indices[0])],infer,m['preprocess_ms'],m['request_ms']),flush=True)
-                if self.args.image or (self.args.max_frames and self.completed >= self.args.max_frames):
+                if self.args.image or self.args.snapshot_out or (self.args.max_frames and self.completed >= self.args.max_frames):
                     with self.lock:
                         self.status = 'COMPLETE'
                     self.stop.set()
@@ -436,8 +445,13 @@ def verify_model(a,folder):
         filename = 'tinyvit-21m-mlp-w8a8.mnn'
     manifest = json.loads((folder/'models'/manifest_name).read_text())
     expected = {manifest['models'][filename]['sha256']}
-    if candidate == '5m' and a.mode != 'cpu-fp32' and a.model:
-        expected.add(manifest['teammate_mixed_sha256'])
+    if candidate == '5m' and a.model:
+        upstream_key = 'teammate_fp32_sha256' if a.mode == 'cpu-fp32' else 'teammate_mixed_sha256'
+        expected.add(manifest[upstream_key])
+    if a.mode == 'hybrid-codesign':
+        expected = {manifest['teammate_mixed_sha256']}
+        if hashlib.sha256(Path(a.projection_ranges).read_bytes()).hexdigest() != manifest['projection_ranges_sha256']:
+            raise ValueError('Projection ranges SHA256 differs from the qualified projection-nine.tsv')
     if not a.model:
         a.model = str(folder/'models'/filename)
     digest = hashlib.sha256()
@@ -456,17 +470,19 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--verify-fixtures')
     folder = Path(__file__).resolve().parent
-    p.add_argument('--runner',default=str(folder/'bin'/'tinyvit_stream'))
+    p.add_argument('--runner')
     p.add_argument('--candidate', choices=['21m','5m'], default='21m')
     p.add_argument('--model')
     p.add_argument('--transform',choices=['mnn-224','camera-crop'],default='camera-crop')
-    p.add_argument('--mode', choices=['cpu-fp32','cpu-mixed','hybrid-unfused','hybrid'],default='cpu-fp32')
+    p.add_argument('--mode', choices=['cpu-fp32','cpu-mixed','hybrid-unfused','hybrid','hybrid-codesign'],default='cpu-fp32')
+    p.add_argument('--projection-ranges', help='Upstream projection-nine.tsv for hybrid-codesign')
     p.add_argument('--labels',default=str(folder/'imagenet_labels.txt'))
     p.add_argument('--profile',action='store_true',help='Enable detailed MNN/FPGA phase timers')
     p.add_argument('--threads',type=int,choices=[1,2],default=2)
     p.add_argument('--ffmpeg',default='ffmpeg'); p.add_argument('--device',default='/dev/video0')
     p.add_argument('--size',default='640x480'); p.add_argument('--fps',type=int,default=30)
-    p.add_argument('--image'); p.add_argument('--snapshot-out'); p.add_argument('--timings')
+    p.add_argument('--image'); p.add_argument('--timings')
+    p.add_argument('--snapshot-out', help='Save one classified frame and exit; defaults to live capture without --image')
     p.add_argument('--max-frames',type=int,default=0)
     p.add_argument('--preview', action='store_true',help='Offer a read-only browser view during capture')
     p.add_argument('--bind',default='0.0.0.0'); p.add_argument('--port',type=int,default=8080)
@@ -474,15 +490,23 @@ def main():
     a=p.parse_args()
     if a.verify_fixtures:
         raise SystemExit(0 if verify_fixtures(a.verify_fixtures) else 1)
+    if not a.runner:
+        executable = 'tinyvit_stream_codesign' if a.mode == 'hybrid-codesign' else 'tinyvit_stream'
+        a.runner = str(folder/'bin'/executable)
+    if a.mode == 'hybrid-codesign':
+        if a.candidate != '5m' or not a.model or not a.projection_ranges:
+            p.error('hybrid-codesign requires --candidate 5m, --model, and --projection-ranges')
+    elif a.projection_ranges:
+        p.error('--projection-ranges requires --mode hybrid-codesign')
     try:
         verify_model(a,folder)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         p.error(str(exc))
     if a.fps <= 0 or a.timeout <= 0 or a.max_frames < 0:
         p.error('Invalid rate/timeout/count')
     if a.timings and Path(a.timings).exists(): p.error('Timings file exists; choose a new filename')
     if a.snapshot_out:
-        if not a.image: p.error('--snapshot-out requires --image')
+        if a.max_frames > 1: p.error('--snapshot-out saves one frame; use --max-frames 1')
         Path(a.snapshot_out).mkdir()  # New directory only; parent must exist.
     demo=Demo(a)
     server=Server((a.bind,a.port),handler_for(demo)) if a.preview else None

@@ -51,7 +51,7 @@ python3 summarize_hps_local.py hybrid-live.csv
 
 The smoke executable includes an integer reference check for the 21M workload, 784 × 192 → 768 → 192. The model and CPU demo assets are included. The [physical board measurements](evidence/21m/board-measurements.md) include live camera predictions and the four-mode benchmark.
 
-### TinyViT-5M interim camera demo
+### TinyViT-5M camera demo
 
 Deploy the updated `demo/` directory together, including the new runner and mixed model. Both candidates use the same UVC capture, camera crop, persistent MNN session, ImageNet labels and optional browser preview. From the deployed directory, check a saved frame first. For hybrid execution, bring up the 90 MHz NI82 image and run the smoke check above.
 
@@ -61,11 +61,42 @@ sudo python3 hps_local_demo.py --candidate 5m --mode hybrid --image fixtures/jpe
 sudo python3 hps_local_demo.py --candidate 5m --mode hybrid --device /dev/video0 --max-frames 20 --timings five-live.csv --preview
 ```
 
+To verify FPGA inference on an actual camera frame, capture one hybrid prediction and replay the saved source JPEG in CPU mixed mode. Use fresh output directories for both runs.
+
+```sh
+sudo python3 hps_local_demo.py --candidate 5m --mode hybrid --device /dev/video0 --snapshot-out five-camera-fpga
+python3 hps_local_demo.py --candidate 5m --mode cpu-mixed --image five-camera-fpga/source.jpg --snapshot-out five-camera-cpu
+cmp five-camera-fpga/input.bin five-camera-cpu/input.bin
+```
+
+Each `result.json` contains the top-five predictions and hardware counters. The saved `logits.bin` files contain 1,000 little-endian FP32 scores for comparison.
+
 The terminal and CSV identify the candidate. Each accepted 5M hybrid frame requires **437 FPGA jobs, 30 linear operations and 4 resident MLP pairs**. Use `--mode hybrid-unfused` for the 434-job, 30-linear, zero-pair path. Use `--mode cpu-mixed` to compare identical weights and preprocessing on the HPS, or `--mode cpu-fp32` for the original FP32 baseline. Both CPU modes require zero hardware counters.
 
 The bundled 5M mixed export starts with this checkout’s official distilled FP32 model. It applies [the team’s 37-layer W8A8 policy](mnn-fpga/mnn/app/tinyvit_w8a8_accuracy_allowlist.txt) using MNN 3.6.2 and 128 Imagenette training crops. To reproduce it, run `scripts/prepare_21m_data.py` on Imagenette2-160, compile `mnn-fpga/mnn/app/create_mixed_quantized_model.cpp` with the same include paths as `scripts/rebuild_models.sh`, then run `mnn-fpga/mnn/app/quantize_tinyvit_w8a8.py` with `--model demo/models/tinyvit-5m-fp32.mnn --calibration-dir DATA/train --mixed-builder PATH_TO_BUILDER --output NEW_MODEL.mnn`.
 
-Host MNN scored the bundled mixed model at 158/200 top-1 and 195/200 top-5 on the existing Imagenette validation sample. Its top prediction matched FP32 on 198/200 inputs. The ARM runner’s offline plan found 30 linears and four pairs. Physical camera throughput, FPGA counters and hybrid logits for this export still need a DE1-SoC run. Compare the two saved snapshots on the board before timing live frames. For the exact mixed graph from the teammate’s board measurements, add `--model /home/ubuntu/tinyvit/tiny-vit-mixed-w8a8-accuracy.mnn` in mixed or hybrid mode. The launcher checks its published hash. [Upstream NI82 qualification](mnn-fpga/docs/tinyvit-native-resident-offload.md)
+Host MNN scored the bundled mixed model at 158/200 top-1 and 195/200 top-5 on the existing Imagenette validation sample. Its top prediction matched FP32 on 198/200 inputs. The ARM runner’s offline plan found 30 linears and four pairs. For the exact mixed graph from the teammate’s board measurements, add `--model /home/ubuntu/tinyvit/tiny-vit-mixed-w8a8-accuracy.mnn` in mixed or hybrid mode. The launcher checks its published hash. [Upstream NI82 qualification](mnn-fpga/docs/tinyvit-native-resident-offload.md)
+
+On November 23, 2026, the DE1-SoC passed the NI82 smoke test and classified five live UVC frames with the bundled mixed model. Each frame reported 437 FPGA jobs, 30 linears and four resident pairs. Median inference time was 1.117 s for this five-frame run. A separate live snapshot and its CPU replay produced byte-identical input tensors, both predicted `window shade`, and had a logit cosine similarity of 0.997589. The smoke test stalled after a Linux software reboot and passed after a physical HPS reset followed by the documented U-Boot and JTAG sequence.
+
+### TinyViT-5M co-design camera mode
+
+See the [TinyViT-5M board report](evidence/5m/board-measurements.md) for the three-mode latency comparison, recorded demos, and commands.
+
+`hybrid-codesign` uses the upstream nine calibrated FP32 projections, optimized HPS attention and GELU, DMC1 chained DMA, and overlapped output staging. It checks for **400 FPGA jobs, 39 linear operations and four resident pairs** per frame. The upstream 1.595× figure was measured on warmed MNN forwards against its original FP32 checkpoint. [Benchmark and timing scope](https://github.com/PlutoPuppy/mnn-fpga/blob/a75a4b2342079a2195761a5ffc8b22a63494e9f3/docs/tinyvit-codesign-optimization.md)
+
+Build the ARM stream executable with `sh scripts/build_runner.sh` in Linux or WSL with CMake and the arm-linux-gnueabihf toolchain. The script writes `demo/bin/tinyvit_stream_codesign`. The qualified deployment archive, `tinyvit-codesign-90mhz.tar.gz`, supplies the matching DMC1 SOF, mixed model and projection ranges. Its SHA-256 is `591b3d33bcf4cf85695ddad18dcf143389408858a59ebcfa3bc0db8746182668`. Use the temporary U-Boot/JTAG boot procedure to load the DMC1 SOF, then run from the deployed demo directory on the board.
+
+```sh
+sudo python3 hps_local_demo.py --candidate 5m --mode hybrid-codesign \
+  --model models/tiny-vit-mixed-w8a8-accuracy.mnn \
+  --projection-ranges models/projection-nine.tsv \
+  --device /dev/video0 --max-frames 5 --timings codesign-live.csv
+```
+
+Use `--mode cpu-mixed --model models/tiny-vit-mixed-w8a8-accuracy.mnn` for the same-model CPU comparison. For the upstream FP32 baseline, use `--mode cpu-fp32 --model models/tiny-vit.mnn` with the original checkpoint. Omit `--projection-ranges` in either CPU mode. The camera CSV records both forward time (`infer_ms`) and JPEG receipt to logits (`received_to_result_ms`).
+
+On the DE1-SoC with the verified upstream DMC1 bitstream, the co-design stream averaged 845.7 ms per forward and 1,022.5 ms from JPEG receipt to logits. The corresponding means were 1,279.8 ms and 1,442.9 ms for original FP32 CPU, and 1,179.5 ms and 1,344.1 ms for mixed CPU. Each mode used the same ARM stream binary and two HPS threads. The comparison used 10 live frames per mode after discarding the first frame. The captures were sequential live feeds. All measured FPGA frames reported 400 jobs, 39 offloaded operations and four resident pairs. Raw CSVs are on the board in `~/tinyvit5m-camera/dmc1-latency-PxsvmJ/`.
 
 ### What the audience sees
 

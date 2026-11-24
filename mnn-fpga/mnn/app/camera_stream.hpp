@@ -5,13 +5,22 @@
 #include <unistd.h>
 #include <sys/resource.h>
 
-using ProtocolPipe = std::unique_ptr<FILE, decltype(&std::fclose)>;
+struct CloseProtocolPipe {
+    void operator()(FILE* pipe) const { std::fclose(pipe); }
+};
+using ProtocolPipe = std::unique_ptr<FILE, CloseProtocolPipe>;
 
 inline ProtocolPipe camera_output() {
-    FILE* output = fdopen(dup(STDOUT_FILENO), "wb");
-    if (!output || dup2(STDERR_FILENO, STDOUT_FILENO) < 0)
+    const int fd = dup(STDOUT_FILENO);
+    if (fd < 0) throw std::runtime_error("Cannot duplicate camera output pipe");
+    ProtocolPipe output(fdopen(fd, "wb"));
+    if (!output) {
+        close(fd);
+        throw std::runtime_error("Cannot open camera output pipe");
+    }
+    if (dup2(STDERR_FILENO, STDOUT_FILENO) < 0)
         throw std::runtime_error("Cannot separate camera protocol from MNN diagnostics");
-    return ProtocolPipe(output, &std::fclose);
+    return output;
 }
 
 inline void camera_message(FILE* pipe, const std::string& message, const float* logits = nullptr) {
@@ -24,7 +33,8 @@ inline void camera_message(FILE* pipe, const std::string& message, const float* 
 
 template <class Run>
 void serve_camera(FILE* pipe, MNN::Tensor& input, MNN::Tensor& host, MNN::Tensor& output,
-                  Run run, double load_ms, unsigned native_layers, bool profile) {
+                  Run run, double load_ms, unsigned native_layers, bool profile,
+                  NativeProjections* projections) {
     using Clock = std::chrono::steady_clock;
     const auto ms = [](Clock::time_point t) {
         return std::chrono::duration<double,std::milli>(Clock::now() - t).count();
@@ -48,6 +58,7 @@ void serve_camera(FILE* pipe, MNN::Tensor& input, MNN::Tensor& host, MNN::Tensor
         mnn_fpga_profile_reset(profile);
         auto jobs_before = mnn_fpga_completed_jobs();
         auto ops_before = mnn_fpga_completed_int8_operations();
+        if (projections) projections->reset();
         const auto infer_start = Clock::now();
         run();
         const double infer_ms = ms(infer_start);
@@ -55,6 +66,9 @@ void serve_camera(FILE* pipe, MNN::Tensor& input, MNN::Tensor& host, MNN::Tensor
         auto ops = mnn_fpga_completed_int8_operations() - ops_before;
         if (ops != native_layers || (jobs > 0) != (native_layers > 0))
             throw std::runtime_error("Unexpected per-frame FPGA job or layer count");
+        if (projections && !projections->valid(1))
+            throw std::runtime_error("Unexpected per-frame FPGA projection count");
+        if (projections) ops += projections->size();
         if (!output.copyToHostTensor(&scores)) throw std::runtime_error("Camera output copy failed");
         const double service = ms(start);
         rusage resources{};
