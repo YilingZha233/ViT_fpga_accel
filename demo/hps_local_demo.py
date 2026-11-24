@@ -218,20 +218,19 @@ class JPEGStream:
         return frames
 
 
-PAGE = b'''<!doctype html><html><head><meta charset="utf-8"><title>HPS TinyViT</title>
-<style>body{font:18px system-ui;background:#111827;color:#eef2ff;margin:24px}section{display:flex;gap:24px;flex-wrap:wrap}img{max-width:100%;background:#263244}#live{width:640px}#crop{width:224px}pre{white-space:pre-wrap}small{color:#cbd5e1}</style></head>
+PAGE = b'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HPS TinyViT</title>
+<style>body{font:16px system-ui;background:#111827;color:#eef2ff;margin:24px}section{display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap}figure{margin:0}img{display:block;max-width:100%;height:auto;background:#263244;object-fit:contain}#live{width:min(640px,calc(100vw - 48px));aspect-ratio:4/3}#crop{width:224px;min-height:224px}pre{white-space:pre-wrap;overflow-wrap:anywhere}small{color:#cbd5e1}</style></head>
 <body><h1>DE1-SoC / TinyViT MNN</h1><p>Camera and preprocessing run on HPS.</p>
-<section><div><h3>Live preview</h3><img id="live" alt="Waiting for camera"></div><div><h3>Last classified crop</h3><img id="crop" alt="Waiting for result"><pre id="labels"></pre></div></section>
+<section><figure><h3>Live preview</h3><img id="live" src="/stream.mjpg" alt="Waiting for camera"></figure><figure><h3>Last classified crop</h3><img id="crop" alt="Waiting for result"><pre id="labels"></pre></figure></section>
 <pre id="status">Connecting...</pre><small>Scores are softmax, not calibrated accuracy. Preview rate differs from classification rate.</small>
 <script>
-let shown=-1, lastFrame=-1;
+let shown=-1;
 async function poll(){try{const r=await fetch('/status',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!r.ok)throw Error('HTTP '+r.status);const s=await r.json();
-if(s.frame_id!==lastFrame){document.getElementById('live').src='/preview.jpg?v='+s.frame_id;lastFrame=s.frame_id;}
 let text=(s.result?s.result.candidate+' '+s.result.mode+' | ':'')+s.status+' | completed: '+s.completed+' | preview received age: '+(s.preview_age_s===null?'n/a':s.preview_age_s.toFixed(1)+' s');
-if(s.result){let q=s.result;if(q.frame_id!==shown){document.getElementById('crop').src='data:image/jpeg;base64,'+q.crop_b64;document.getElementById('labels').textContent=q.top5.map(x=>x.label+': '+(100*x.score).toFixed(1)+'%').join('\\n');shown=q.frame_id;}
+if(s.result){let q=s.result;if(q.frame_id!==shown){let crop=new Image();crop.onload=()=>{let target=document.getElementById('crop');target.src=crop.src;};crop.src='/crop.jpg?v='+q.frame_id;document.getElementById('labels').textContent=q.top5.map(x=>x.label+': '+(100*x.score).toFixed(1)+'%').join('\\n');shown=q.frame_id;}
 text+='\\nResult frame '+q.frame_id+' | frame age '+s.result_age_s.toFixed(1)+' s';text+='\\nHPS JPEG decode '+q.decode_ms.toFixed(1)+' ms | preprocessing '+q.preprocess_ms.toFixed(1)+' ms';text+='\\nModel inference '+q.infer_ms.toFixed(0)+' ms | request '+(q.request_ms/1000).toFixed(2)+' s';}
 if(s.error)text+='\\nSTOPPED / STALE: '+s.error;document.getElementById('status').textContent=text;
-}catch(e){document.getElementById('status').textContent='DISCONNECTED / STALE: '+e.message;}setTimeout(poll,200);}poll();
+}catch(e){document.getElementById('status').textContent='DISCONNECTED / STALE: '+e.message;}setTimeout(poll,500);}poll();
 </script></body></html>'''
 
 
@@ -408,7 +407,40 @@ def handler_for(demo):
             if path == '/':
                 data, mime = PAGE, 'text/html; charset=utf-8'
             elif path == '/status':
-                data, mime = json.dumps(demo.state()).encode('utf-8'), 'application/json'
+                state = demo.state()
+                if state['result']:
+                    state['result'] = {key:value for key,value in state['result'].items() if key != 'crop_b64'}
+                data, mime = json.dumps(state).encode('utf-8'), 'application/json'
+            elif path == '/crop.jpg':
+                with demo.lock:
+                    result = demo.result
+                    data = base64.b64decode(result['crop_b64']) if result and result.get('crop_b64') else None
+                if data is None:
+                    self.send_error(503,'Waiting for classification'); return
+                mime = 'image/jpeg'
+            elif path == '/stream.mjpg':
+                self.connection.settimeout(5)
+                self.send_response(200)
+                self.send_header('Content-Type','multipart/x-mixed-replace; boundary=frame')
+                self.send_header('Cache-Control','no-store, no-cache, must-revalidate')
+                self.send_header('Pragma','no-cache')
+                self.send_header('Connection','close')
+                self.end_headers()
+                last_frame = -1
+                try:
+                    while not demo.stop.is_set():
+                        with demo.lock:
+                            item = demo.latest
+                        if item and item[0] != last_frame:
+                            frame_id, _, jpeg = item
+                            self.wfile.write(b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '+str(len(jpeg)).encode('ascii')+b'\r\n\r\n'+jpeg+b'\r\n')
+                            self.wfile.flush()
+                            last_frame = frame_id
+                        else:
+                            time.sleep(.02)
+                except (BrokenPipeError,ConnectionResetError,socket.timeout):
+                    pass
+                return
             elif path == '/preview.jpg':
                 with demo.lock:
                     data = demo.latest[2] if demo.latest else None
